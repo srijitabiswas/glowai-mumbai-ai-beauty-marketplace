@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
-import { Sparkles, Check } from 'lucide-react'
+import { Sparkles, Check, ArrowLeft } from 'lucide-react'
 import { useBeautyProfile } from '../context/BeautyProfileContext'
-import { analyzeBeautyProfile } from '../services/aiService'
+import { AnalysisValidationError, analyzeBeautyProfile } from '../services/aiService'
 
 const STEPS = [
   'Analysing your preferences',
@@ -17,31 +17,59 @@ export default function AIAnalysis() {
   const { profile, saveAnalysis } = useBeautyProfile()
   const [current, setCurrent]     = useState(0)
   const [done, setDone]           = useState(false)
+  const [validationErrors, setValidationErrors] = useState([])
 
   useEffect(() => {
     if (!profile) { navigate('/profile-setup'); return }
+    let active = true
 
     const run = async () => {
       for (let i = 0; i < STEPS.length; i++) {
+        if (!active) return
         await new Promise((r) => setTimeout(r, 750))
+        if (!active) return
         setCurrent(i + 1)
       }
-      const result = await analyzeBeautyProfile(profile)
-      saveAnalysis(result)
-      setDone(true)
-      setTimeout(() => navigate('/dashboard'), 900)
+      if (!active) return
+      try {
+        const result = await analyzeBeautyProfile(profile)
+        if (!active) return
+        saveAnalysis(result)
+        setDone(true)
+        setTimeout(() => {
+          if (active) navigate('/dashboard')
+        }, 900)
+      } catch (err) {
+        if (!active) return
+        if (err instanceof AnalysisValidationError || err?.name === 'AnalysisValidationError') {
+          setValidationErrors(err.errors || [err.message])
+          return
+        }
+        setValidationErrors(['Analysis failed. Please retake your selfie in good lighting and try again.'])
+      }
     }
     run()
+
+    return () => {
+      active = false
+    }
   }, [])
 
   return (
-    <div className="min-h-screen bg-glow-black flex flex-col items-center justify-center px-4" style={{ background: 'radial-gradient(ellipse at 50% 0%, rgba(201,168,106,0.12) 0%, #1A1A1A 60%)' }}>
+    <div className="min-h-screen bg-glow-black flex flex-col items-center justify-center px-4 relative" style={{ background: 'radial-gradient(ellipse at 50% 0%, rgba(201,168,106,0.12) 0%, #1A1A1A 60%)' }}>
+      {/* Back Button */}
+      <button
+        onClick={() => navigate('/profile-setup')}
+        className="absolute top-8 left-8 flex items-center gap-2 font-inter text-sm text-white/60 hover:text-white transition-all duration-200 z-20"
+      >
+        <ArrowLeft size={15} /> Back to Setup
+      </button>
       {/* Logo */}
       <motion.div
         initial={{ opacity: 0, scale: 0.8 }}
         animate={{ opacity: 1, scale: 1 }}
         transition={{ duration: 0.5 }}
-        className="flex items-center gap-2 mb-16"
+        className="flex items-center gap-2 mb-12"
       >
         <div className="w-10 h-10 bg-gradient-to-br from-glow-gold to-glow-rose rounded-full flex items-center justify-center">
           <Sparkles size={18} className="text-white" />
@@ -50,7 +78,7 @@ export default function AIAnalysis() {
       </motion.div>
 
       {/* Pulse ring */}
-      <div className="relative mb-14">
+      <div className="relative mb-12 flex items-center justify-center">
         <motion.div
           animate={{ scale: [1, 1.18, 1], opacity: [0.35, 0.12, 0.35] }}
           transition={{ duration: 2.2, repeat: Infinity, ease: 'easeInOut' }}
@@ -68,6 +96,29 @@ export default function AIAnalysis() {
         </div>
       </div>
 
+      {validationErrors.length > 0 ? (
+        <motion.div
+          initial={{ opacity: 0, y: 18 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="w-full max-w-md rounded-2xl border border-amber-400/30 bg-amber-400/10 p-6 text-center"
+        >
+          <h2 className="font-playfair text-2xl font-semibold text-white mb-3">Selfie Needs A Retake</h2>
+          <p className="font-inter text-sm text-white/80 leading-relaxed mb-5">
+            We could not analyze this image reliably, so GlowAI stopped before making any guesses.
+          </p>
+          <div className="space-y-2 text-left mb-6">
+            {validationErrors.map((error) => (
+              <p key={error} className="font-inter text-sm text-amber-100 bg-black/20 border border-white/10 rounded-xl px-3 py-2">
+                {error}
+              </p>
+            ))}
+          </div>
+          <button onClick={() => navigate('/profile-setup')} className="btn-gold w-full">
+            Retake Selfie
+          </button>
+        </motion.div>
+      ) : (
+        <>
       <motion.h2
         initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
@@ -75,7 +126,7 @@ export default function AIAnalysis() {
       >
         Crafting Your Profile
       </motion.h2>
-      <p className="font-inter text-sm text-white/45 mb-12 text-center max-w-sm">
+      <p className="font-inter text-sm text-white/70 mb-12 text-center max-w-sm">
         Our AI is analysing your preferences to build your personalised beauty concierge experience.
       </p>
 
@@ -101,7 +152,7 @@ export default function AIAnalysis() {
                   <motion.div animate={{ scale: [1, 1.4, 1] }} transition={{ duration: 0.8, repeat: Infinity }} className="w-2 h-2 bg-glow-gold rounded-full" />
                 )}
               </div>
-              <span className={`font-inter text-sm ${state === 'done' ? 'text-glow-gold' : state === 'active' ? 'text-white' : 'text-white/35'}`}>
+              <span className={`font-inter text-sm ${state === 'done' ? 'text-glow-gold' : state === 'active' ? 'text-white' : 'text-white/60'}`}>
                 {step}
               </span>
             </motion.div>
@@ -117,6 +168,8 @@ export default function AIAnalysis() {
         >
           Your beauty concierge is ready ✦
         </motion.p>
+      )}
+        </>
       )}
     </div>
   )

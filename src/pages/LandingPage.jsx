@@ -4,7 +4,18 @@ import { useNavigate } from 'react-router-dom'
 import {
   Play, ArrowRight, Star, MapPin, CheckCircle2,
   Sparkles, ChevronRight, Shield, Zap, Heart,
+  Camera, Loader2, Check, AlertCircle, UploadCloud, Info, Bug
 } from 'lucide-react'
+import { FaceDetector, FilesetResolver } from '@mediapipe/tasks-vision'
+import { initFaceLandmarker, detectLandmarks, classifyFaceShape } from '../services/faceAnalysisService'
+import { analyzeSkin } from '../services/skinAnalysisService'
+import {
+  validateImageSource,
+  validateLandmarkReadiness,
+  IMAGE_VALIDATION_THRESHOLDS,
+  HAIR_VISIBILITY_ERROR
+} from '../services/imageValidation'
+import beautyScanAvatar from '../assets/beauty-scan-avatar.png'
 import MainLayout    from '../layouts/MainLayout'
 import SalonCard     from '../components/SalonCard'
 import ExperienceCard from '../components/ExperienceCard'
@@ -12,6 +23,8 @@ import TestimonialCard from '../components/TestimonialCard'
 import SectionHeader from '../components/SectionHeader'
 import { salons }      from '../data/salons'
 import { experiences } from '../data/experiences'
+
+const DEBUG_ENABLED = import.meta.env.VITE_DEBUG === 'true'
 
 /* ---------- Animated Counter ---------- */
 function Counter({ target, suffix = '' }) {
@@ -32,62 +45,869 @@ function Counter({ target, suffix = '' }) {
   return <span ref={ref}>{count.toLocaleString()}{suffix}</span>
 }
 
-/* ---------- Beauty Profile Preview Card ---------- */
-function ProfilePreviewCard() {
+
+/* ---------- Validation Check Config ---------- */
+// 'required' checks must ALL pass to enable capture. 'faceSize' is also required.
+const VALIDATION_CHECKS = [
+  { key: 'facePresent',  passLabel: 'Face Detected',         failLabel: 'Position your face in the frame' },
+  { key: 'oneFace',      passLabel: 'Single Face',            failLabel: 'Multiple faces detected. Only you should be in frame.' },
+  { key: 'faceSize',     passLabel: 'Face Close Enough',      failLabel: 'Move closer to the camera' },
+  { key: 'faceCentered', passLabel: 'Face Centered',          failLabel: 'Please face the camera directly' },
+  { key: 'hairVisible',  passLabel: 'Hair Visible',           failLabel: 'Open your hair for better style analysis' },
+  { key: 'lightingGood', passLabel: 'Good Lighting',          failLabel: 'Move to a brighter area' },
+  { key: 'notBlurry',    passLabel: 'Image Sharp',            failLabel: 'Hold steady — image is blurry' },
+]
+
+/* ---------- analyzeCapture ------------------------------------------------
+ * Runs real face-shape + skin-tone analysis on the captured selfie.
+ * Called during the 'analyzing' state — entirely client-side.
+ * Returns a structured result object; never throws (errors → null fields).
+ * ---------------------------------------------------------------------- */
+const MIN_CONFIDENCE = 60
+
+async function analyzeCapture(imageDataUrl, hairWasVisible) {
+  if (!imageDataUrl) {
+    return {
+      faceShape: null, faceShapeConfidence: 0,
+      faceShapeReason: 'No image captured.',
+      skinTone: null, skinUndertone: null, skinConfidence: 0,
+      skinReason: 'No image captured.',
+      hairVisible: hairWasVisible,
+      landmarksDetected: false,
+    }
+  }
+
+  // 1. Load image element from base64 data-URL (or object URL)
+  const imgEl = await new Promise((resolve, reject) => {
+    const el = new window.Image()
+    el.onload  = () => resolve(el)
+    el.onerror = reject
+    el.src = imageDataUrl
+  })
+
+  // 2. Detect facial landmarks — numFaces:4 to count multi-face
+  let landmarkResult = null
+  try {
+    landmarkResult = await detectLandmarks(imgEl)
+  } catch (err) {
+    console.warn('[GlowAI] FaceLandmarker error:', err)
+  }
+
+  // detectLandmarks returns faceLandmarks[0] (first face) or null
+  const landmarks = landmarkResult
+
+  if (!landmarks) {
+    return {
+      faceShape: null, faceShapeConfidence: 0,
+      faceShapeReason:
+        'No facial landmarks detected. Please retake in good lighting with your face clearly visible.',
+      skinTone: null, skinUndertone: null, skinConfidence: 0,
+      skinReason: 'Skin analysis requires facial landmark detection.',
+      hairVisible: hairWasVisible,
+      landmarksDetected: false,
+    }
+  }
+
+  // 3. Face shape classification — uses technicalClassification key
+  const fsResult = classifyFaceShape(landmarks)
+  const faceShape = fsResult.confidence >= MIN_CONFIDENCE ? fsResult.technicalClassification : null
+
+  // 4. Skin tone & undertone analysis — returns { tone, undertone, confidence, ... }
+  let skinResult = { tone: null, undertone: null, confidence: 0, whyItWasDetected: 'Skin analysis unavailable.' }
+  try {
+    skinResult = analyzeSkin(imgEl, landmarks)
+  } catch (err) {
+    console.warn('[GlowAI] Skin analysis error:', err)
+  }
+
+  const skinTone     = skinResult.confidence >= MIN_CONFIDENCE ? skinResult.tone      : null
+  const skinUndertone = skinResult.confidence >= MIN_CONFIDENCE ? skinResult.undertone : null
+
+  return {
+    // Face shape — mapped from technicalClassification
+    faceShape,
+    faceShapeConfidence: fsResult.confidence,
+    faceShapeReason:     fsResult.whyItWasDetected,
+    faceShapeMetrics:    fsResult.metrics,
+
+    // Skin — mapped from tone/undertone fields
+    skinTone,
+    skinUndertone,
+    skinConfidence: skinResult.confidence,
+    skinReason:     skinResult.whyItWasDetected,
+
+    // Hair — Phase 1 validates visibility only
+    hairVisible: hairWasVisible,
+
+    landmarksDetected: true,
+  }
+}
+
+/* ---------- Interactive AI Beauty Analyzer ---------- */
+function InteractiveAIBeautyAnalyzer() {
+  const navigate = useNavigate()
+
+  // States: 'idle' | 'initializing' | 'detecting' | 'capturing' | 'analyzing' | 'results' | 'error'
+  const [scanState, setScanState] = useState('idle')
+  const [errorMsg, setErrorMsg] = useState('')
+  const [capturedImage, setCapturedImage] = useState(null)
+  const [analyzingStep, setAnalyzingStep] = useState(0)
+
+  // Real analysis result — populated during 'analyzing' state
+  const [analysisResult, setAnalysisResult] = useState(null)
+
+  // Per-check validation: null = checking, true = pass, false = fail
+  const [validation, setValidation] = useState({
+    facePresent:  null,
+    oneFace:      null,
+    faceSize:     null,
+    faceCentered: null,
+    hairVisible:  null,
+    lightingGood: null,
+    notBlurry:    null,
+  })
+
+  // Debug panel toggle
+  const [showDebug, setShowDebug] = useState(false)
+  // Upload-time validation errors
+  const [uploadErrors, setUploadErrors] = useState([])
+
+  // Real-time quality telemetry debug data
+  const [debugInfo, setDebugInfo] = useState({
+    facesDetected: 0,
+    faceCentered: false,
+    faceSize: 0,
+    brightnessScore: 0,
+    blurScore: 0,
+    hairVisibility: false,
+    validationPassed: false,
+    faceConfidence: 0,
+    skinConfidence: 0,
+    hairConfidence: 0,
+  })
+
+  // Capture-time snapshot of hair visibility (used during analysis)
+  const hairWasVisibleRef = useRef(false)
+
+  const videoRef    = useRef(null)
+  const streamRef   = useRef(null)
+  const detectorRef = useRef(null)
+  const requestRef  = useRef(null)
+
+  // Initialize MediaPipe FaceDetector
+  const initializeDetector = async () => {
+    const vision = await FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm'
+    )
+    return await FaceDetector.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath:
+          'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite',
+      },
+      runningMode: 'VIDEO',
+    })
+  }
+
+  const stopCamera = () => {
+    if (requestRef.current) { cancelAnimationFrame(requestRef.current); requestRef.current = null }
+    if (streamRef.current)  { streamRef.current.getTracks().forEach((t) => t.stop()); streamRef.current = null }
+    if (videoRef.current)   { videoRef.current.srcObject = null }
+  }
+
+  // Cleanup on unmount
+  useEffect(() => () => stopCamera(), [])
+
+  // ── Start scan ────────────────────────────────────────────────────────────
+  const startScan = async () => {
+    setScanState('initializing')
+    setErrorMsg('')
+    setCapturedImage(null)
+    setAnalysisResult(null)
+    setValidation({ facePresent: null, oneFace: null, faceSize: null, faceCentered: null, hairVisible: null, lightingGood: null, notBlurry: null })
+    setUploadErrors([])
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 640 } },
+      })
+      streamRef.current = stream
+
+      // Preload FaceLandmarker in the background so it's warm by capture time
+      initFaceLandmarker().catch(() => {})
+
+      let detector = detectorRef.current
+      if (!detector) {
+        detector = await initializeDetector()
+        detectorRef.current = detector
+      }
+
+      setScanState('detecting')
+
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream
+          videoRef.current.play().catch((e) => console.error('Video play error:', e))
+          startValidationLoop(detector)
+        }
+      }, 150)
+    } catch (err) {
+      console.error('Camera/Detector init error:', err)
+      const msg =
+        err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError'
+          ? 'Camera access denied. Please enable camera permission in your browser settings.'
+          : 'Could not access camera. Please ensure permissions are granted.'
+      setErrorMsg(msg)
+      setScanState('error')
+    }
+  }
+
+  // ── Real-time validation loop ─────────────────────────────────────────────
+  const startValidationLoop = (detector) => {
+    const tick = () => {
+      const video = videoRef.current
+      if (!video || video.readyState < 2) {
+        requestRef.current = requestAnimationFrame(tick)
+        return
+      }
+
+      const vw = video.videoWidth || 640
+      const vh = video.videoHeight || 640
+      const validationResult = validateImageSource(video, detector, vw, vh)
+
+      const {
+        facesDetected,
+        faceCentered,
+        faceSize,
+        brightnessScore,
+        blurScore,
+        hairVisibility,
+      } = validationResult
+
+      const oneFace = facesDetected === 1
+      const faceSizeOk = faceSize >= IMAGE_VALIDATION_THRESHOLDS.faceHeightMin * 100 &&
+                         faceSize <= IMAGE_VALIDATION_THRESHOLDS.faceHeightMax * 100
+      const lightingGood = brightnessScore > IMAGE_VALIDATION_THRESHOLDS.brightnessMin
+      const notBlurry = blurScore > IMAGE_VALIDATION_THRESHOLDS.blurMin
+
+      setValidation({
+        facePresent: facesDetected >= 1,
+        oneFace,
+        faceSize: faceSizeOk,
+        faceCentered,
+        hairVisible,
+        lightingGood,
+        notBlurry,
+      })
+
+      setDebugInfo({
+        facesDetected,
+        faceCentered,
+        faceSize,
+        brightnessScore: parseFloat(brightnessScore.toFixed(1)),
+        blurScore: parseFloat(blurScore.toFixed(2)),
+        hairVisibility,
+        validationPassed: validationResult.validationPassed,
+        faceConfidence: 0,
+        skinConfidence: 0,
+        hairConfidence: 0,
+      })
+
+      requestRef.current = requestAnimationFrame(tick)
+    }
+    requestRef.current = requestAnimationFrame(tick)
+  }
+
+  // ── Capture selfie ────────────────────────────────────────────────────────
+  const capturePhoto = () => {
+    const video = videoRef.current
+    if (!video) return
+    const c  = document.createElement('canvas')
+    c.width  = video.videoWidth  || 640
+    c.height = video.videoHeight || 640
+    const ctx = c.getContext('2d')
+    // Un-mirror the CSS-flipped video so landmarks map correctly
+    ctx.translate(c.width, 0)
+    ctx.scale(-1, 1)
+    ctx.drawImage(video, 0, 0)
+    // Snapshot hair visibility before stopping camera
+    hairWasVisibleRef.current = validation.hairVisible === true
+    setCapturedImage(c.toDataURL('image/jpeg', 0.85))
+    stopCamera()
+    setScanState('capturing')
+    setTimeout(() => setScanState('analyzing'), 900)
+  }
+
+  // ── Analyzing — real AI analysis + visual step animation ─────────────────
+  useEffect(() => {
+    if (scanState !== 'analyzing') return
+    setAnalyzingStep(0)
+
+    let active        = true
+    let timerDone     = false
+    let analysisDone  = false
+
+    // Transition only when BOTH the visual animation AND the real analysis finish
+    const tryTransition = () => {
+      if (timerDone && analysisDone && active) setScanState('results')
+    }
+
+    // Visual step timers (UX pacing — minimum 4.5 s)
+    const t1 = setTimeout(() => { if (active) setAnalyzingStep(1) }, 1100)
+    const t2 = setTimeout(() => { if (active) setAnalyzingStep(2) }, 2200)
+    const t3 = setTimeout(() => { if (active) setAnalyzingStep(3) }, 3300)
+    const t4 = setTimeout(() => { timerDone = true; tryTransition() }, 4500)
+
+    // Real image-derived analysis (async)
+    ;(async () => {
+      try {
+        const result = await analyzeCapture(capturedImage, hairWasVisibleRef.current)
+        if (!active) return
+        setAnalysisResult(result)
+      } catch (err) {
+        console.error('[GlowAI] analyzeCapture error:', err)
+        if (active) setAnalysisResult({ error: true, hairVisible: hairWasVisibleRef.current })
+      } finally {
+        analysisDone = true
+        tryTransition()
+      }
+    })()
+
+    return () => {
+      active = false
+      clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4)
+    }
+  }, [scanState, capturedImage])
+
+  // ── Fallback photo upload — uses shared landmark readiness validation before analyzing
+  const handlePhotoFallback = async (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+
+    const objectUrl = URL.createObjectURL(file)
+    const imgEl = await new Promise((resolve, reject) => {
+      const el = new window.Image()
+      el.crossOrigin = 'anonymous'
+      el.onload = () => resolve(el)
+      el.onerror = reject
+      el.src = objectUrl
+    })
+
+    let landmarks = null
+    try {
+      landmarks = await detectLandmarks(imgEl)
+    } catch (err) {
+      console.warn('[GlowAI] Upload landmark detection failed:', err)
+    }
+
+    const readiness = validateLandmarkReadiness(imgEl, landmarks)
+    if (!readiness.validationPassed) {
+      setUploadErrors(readiness.errors)
+      return
+    }
+
+    setUploadErrors([])
+    hairWasVisibleRef.current = true
+    setCapturedImage(objectUrl)
+    setScanState('analyzing')
+  }
+
+  const resetScan = () => {
+    stopCamera()
+    setScanState('idle')
+    setCapturedImage(null)
+    setErrorMsg('')
+    setAnalysisResult(null)
+    setUploadErrors([])
+    hairWasVisibleRef.current = false
+    setValidation({ facePresent: null, oneFace: null, faceSize: null, faceCentered: null, hairVisible: null, lightingGood: null, notBlurry: null })
+  }
+
+  const allValid = VALIDATION_CHECKS.every(({ key }) => validation[key] === true)
+
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <motion.div
-      animate={{ y: [0, -12, 0] }}
-      transition={{ duration: 5.5, repeat: Infinity, ease: 'easeInOut' }}
-      className="bg-glow-black rounded-3xl p-6 shadow-luxury-lg w-full max-w-sm mx-auto lg:mx-0"
+      animate={{ y: [0, -10, 0] }}
+      transition={{ duration: 6, repeat: Infinity, ease: 'easeInOut' }}
+      className="bg-glow-black border border-glow-gold/20 rounded-3xl p-6 shadow-luxury-lg w-full max-w-sm mx-auto lg:mx-0 relative overflow-hidden"
     >
-      {/* Header */}
-      <div className="flex items-center gap-3 mb-6">
-        <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-glow-gold to-glow-rose overflow-hidden">
-          <img src="https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=80&q=80" alt="profile" className="w-full h-full object-cover" />
-        </div>
-        <div>
-          <p className="font-playfair text-white text-sm font-semibold">Priya Sharma</p>
-          <p className="font-inter text-xs text-glow-gold">Beauty Profile</p>
-        </div>
-        <span className="ml-auto text-xs font-inter text-glow-gold bg-glow-gold/15 px-2.5 py-1 rounded-full border border-glow-gold/30">
-          Active
-        </span>
-      </div>
+      {/* Ambient glow */}
+      <div className="absolute top-0 right-0 w-32 h-32 bg-glow-gold/10 rounded-full blur-2xl pointer-events-none" />
+      <div className="absolute bottom-0 left-0 w-32 h-32 bg-glow-rose/10 rounded-full blur-2xl pointer-events-none" />
 
-      {/* Stats */}
-      <div className="space-y-3 mb-6">
-        {[
-          { label: 'Face Shape',       value: 'Oval' },
-          { label: 'Hair Type',        value: 'Wavy' },
-          { label: 'Style Preference', value: 'Modern Classic' },
-          { label: 'Budget Range',     value: '₹2,000 – ₹8,000' },
-        ].map((row) => (
-          <div key={row.label} className="flex items-center justify-between border-b border-white/8 pb-2.5 last:border-0">
-            <span className="font-inter text-xs text-white/45">{row.label}</span>
-            <span className="font-inter text-xs font-medium text-white">{row.value}</span>
+      {/* ── IDLE ───────────────────────────────────────────────────────── */}
+      {scanState === 'idle' && (
+        <div className="flex flex-col items-center text-center py-4">
+          <div className="relative w-44 h-44 rounded-full overflow-hidden border-2 border-glow-gold/30 mb-6 bg-neutral-900 shadow-[0_12px_32px_rgba(0,0,0,0.18)]">
+            <img src={beautyScanAvatar} alt="Guided beauty avatar" className="absolute inset-0 w-full h-full object-cover" />
+            <div className="absolute inset-0 bg-gradient-to-t from-black/20 via-transparent to-transparent" />
+            <Sparkles size={18} className="absolute right-10 top-10 text-glow-gold" />
+            <Sparkles size={12} className="absolute left-11 bottom-12 text-glow-hover-gold" />
           </div>
-        ))}
-      </div>
+          <span className="text-glow-gold text-xs font-inter uppercase tracking-widest mb-2 flex items-center gap-1.5 justify-center">
+            <Sparkles size={11} /> AI Beauty Consultant
+          </span>
+          <h3 className="font-playfair text-white text-xl font-medium mb-3 drop-shadow-[0_0_18px_rgba(0,0,0,0.36)]">Guided Beauty Scan</h3>
+          <p className="font-inter text-xs text-white/90 mb-6 max-w-xs leading-relaxed drop-shadow-[0_0_14px_rgba(0,0,0,0.2)]">
+            Our AI guides you to a clear selfie, then delivers personalised beauty, grooming, and styling recommendations.
+          </p>
+          <button
+            onClick={startScan}
+            className="btn-gold text-xs py-2.5 px-6 shadow-luxury w-full flex items-center justify-center gap-1.5"
+          >
+            <Camera size={14} /> Start AI Beauty Scan
+          </button>
+        </div>
+      )}
 
-      {/* Top Match */}
-      <div className="bg-white/6 rounded-2xl p-3.5 border border-white/10">
-        <p className="font-inter text-xs text-glow-gold mb-2.5 flex items-center gap-1.5">
-          <Sparkles size={11} /> Top Salon Match
-        </p>
-        <div className="flex items-center gap-3">
-          <img src="https://images.unsplash.com/photo-1521590832167-7bcbfaa6381f?w=80&q=80" alt="salon" className="w-10 h-10 rounded-xl object-cover" />
-          <div>
-            <p className="font-playfair text-sm text-white font-medium">Luxe Studio Bandra</p>
-            <div className="flex items-center gap-1 mt-0.5">
-              <Star size={10} className="text-glow-gold fill-glow-gold" />
-              <span className="font-inter text-xs text-white/55">4.9 · Bandra West</span>
+      {/* ── INITIALIZING ───────────────────────────────────────────────── */}
+      {scanState === 'initializing' && (
+        <div className="flex flex-col items-center py-10 text-center">
+          <Loader2 size={36} className="text-glow-gold animate-spin mb-6" />
+          <span className="font-inter text-xs text-glow-gold uppercase tracking-wider font-semibold mb-2">
+            Initializing AI Scan…
+          </span>
+          <p className="font-inter text-[11px] text-white/50 max-w-[200px] leading-relaxed">
+            Requesting camera access and loading beauty models…
+          </p>
+        </div>
+      )}
+
+      {/* ── DETECTING — live validation HUD ────────────────────────────── */}
+      {scanState === 'detecting' && (
+        <div className="flex flex-col items-center py-2 text-center">
+          {/* Circular camera preview */}
+          <div
+            className={`relative w-40 h-40 rounded-full overflow-hidden border-2 mb-4 bg-neutral-950 transition-all duration-500 ${
+              allValid
+                ? 'border-glow-hover-gold shadow-[0_0_22px_rgba(212,175,106,0.35)]'
+                : 'border-glow-gold shadow-[0_0_14px_rgba(201,168,106,0.25)]'
+            }`}
+          >
+            <video
+              ref={videoRef}
+              playsInline
+              muted
+              className="w-full h-full object-cover"
+              style={{ transform: 'scaleX(-1)' }}
+            />
+            {/* Guide oval */}
+            <div className="absolute inset-0 border-2 border-dashed border-white/25 rounded-full m-3 pointer-events-none" />
+            {/* All-clear overlay */}
+            <AnimatePresence>
+              {allValid && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="absolute inset-0 bg-glow-gold/15 flex items-center justify-center"
+                >
+                  <div className="w-11 h-11 bg-glow-deep-gold rounded-full flex items-center justify-center shadow-lg">
+                    <Check size={18} className="text-glow-black" />
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Validation HUD */}
+          <div className="w-full space-y-1 mb-4">
+            {VALIDATION_CHECKS.map(({ key, passLabel, failLabel }) => {
+              const state = validation[key]
+              return (
+                <motion.div
+                  key={key}
+                  layout
+                  className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg transition-colors duration-300 ${
+                    state === true  ? 'bg-glow-gold/10'  :
+                    state === false ? 'bg-amber-500/8'    :
+                    'bg-white/8'
+                  }`}
+                >
+                  <div
+                    className={`w-4 h-4 rounded-full flex items-center justify-center shrink-0 transition-all duration-300 ${
+                      state === true  ? 'bg-glow-deep-gold' :
+                      state === false ? 'bg-amber-500'   :
+                      'bg-white/10'
+                    }`}
+                  >
+                    {state === true  && <Check size={9} className="text-glow-black" />}
+                    {state === false && <span className="text-white text-[8px] font-bold leading-none">✕</span>}
+                    {state === null  && <Loader2 size={8} className="text-white/40 animate-spin" />}
+                  </div>
+                  <span
+                    className={`font-inter text-[11px] text-left leading-tight ${
+                      state === true  ? 'text-glow-hover-gold' :
+                      state === false ? 'text-amber-400'   :
+                      'text-white/60'
+                    }`}
+                  >
+                    {state === false ? failLabel : passLabel}
+                  </span>
+                </motion.div>
+              )
+            })}
+          </div>
+
+          {/* Capture button — enabled only when all checks pass */}
+          <button
+            id="beauty-scan-capture-btn"
+            onClick={capturePhoto}
+            disabled={!allValid}
+            className={`w-full text-xs py-2.5 px-6 rounded-full font-inter font-semibold flex items-center justify-center gap-2 transition-all duration-500 ${
+              allValid
+                ? 'bg-glow-deep-gold text-glow-black shadow-[0_0_22px_rgba(212,175,106,0.35)] hover:bg-glow-hover-gold active:scale-95 cursor-pointer'
+                : 'bg-white/5 text-white/20 cursor-not-allowed'
+            }`}
+          >
+            <Camera size={13} />
+            {allValid ? '✓ Capture Selfie' : 'Checking selfie quality…'}
+          </button>
+
+          {/* Real-time Telemetry Debug Panel */}
+          {DEBUG_ENABLED && (
+            <button
+              onClick={() => setShowDebug(v => !v)}
+              className="mt-3 flex items-center gap-1.5 text-[9px] font-inter text-white/55 hover:text-white/80 transition-colors mx-auto"
+            >
+              <Bug size={9} />{showDebug ? 'Hide' : 'Show'} debug telemetry
+            </button>
+          )}
+
+          {DEBUG_ENABLED && showDebug && (
+            <div className="mt-2 w-full bg-black/40 border border-white/10 rounded-xl p-3 text-left font-mono text-[9px] text-white/70">
+              <div className="text-[10px] font-semibold text-glow-gold border-b border-white/10 pb-1 mb-2 flex items-center justify-between">
+                <span>🎛️ Real-Time Quality Telemetry</span>
+                <span className={`w-2 h-2 rounded-full ${debugInfo.validationPassed ? 'bg-glow-gold' : 'bg-amber-500 animate-pulse'}`} />
+              </div>
+              <pre className="overflow-x-auto whitespace-pre-wrap">
+                {JSON.stringify(debugInfo, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── CAPTURING — freeze frame ────────────────────────────────────── */}
+      {scanState === 'capturing' && (
+        <div className="flex flex-col items-center py-6 text-center">
+          <div className="relative w-40 h-40 rounded-full overflow-hidden border-2 border-glow-hover-gold mb-5 shadow-[0_0_22px_rgba(212,175,106,0.35)]">
+            {capturedImage && (
+              <img src={capturedImage} alt="Captured selfie" className="w-full h-full object-cover" />
+            )}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="absolute inset-0 bg-glow-gold/15 flex items-center justify-center"
+            >
+              <motion.div
+                initial={{ scale: 0.6, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ duration: 0.35, ease: [0.4, 0, 0.2, 1] }}
+                className="w-12 h-12 bg-glow-deep-gold rounded-full flex items-center justify-center shadow-xl"
+              >
+                <Check size={22} className="text-glow-black" />
+              </motion.div>
+            </motion.div>
+          </div>
+
+          {/* Validation summary */}
+          <div className="flex flex-wrap justify-center gap-1.5 mb-4">
+            {['✓ Face Detected', '✓ Hair Visible', '✓ Good Lighting'].map((label) => (
+              <span
+                key={label}
+                className="font-inter text-[10px] text-glow-hover-gold bg-glow-gold/10 border border-glow-gold/20 px-2 py-0.5 rounded-full"
+              >
+                {label}
+              </span>
+            ))}
+          </div>
+          <p className="font-inter text-[11px] text-white/70">Initialising analysis...</p>
+        </div>
+      )}
+
+      {/* ── ANALYZING ──────────────────────────────────────────────────── */}
+      {scanState === 'analyzing' && (
+        <div className="flex flex-col items-center py-3 text-center">
+          <div className="relative w-40 h-40 rounded-full overflow-hidden border-2 border-glow-gold mb-5 bg-neutral-950">
+            {capturedImage ? (
+              <img src={capturedImage} alt="Analysing face" className="w-full h-full object-cover opacity-55" />
+            ) : (
+              <div className="w-full h-full bg-[radial-gradient(circle_at_50%_20%,rgba(228,196,136,0.28),transparent_34%),linear-gradient(160deg,#1f1f22,#0f0f10_68%)] opacity-80" />
+            )}
+            {/* Scan sweep */}
+            <motion.div
+              animate={{ top: ['0%', '100%', '0%'] }}
+              transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
+              className="absolute left-0 right-0 h-0.5 bg-glow-gold shadow-[0_0_10px_rgba(201,168,106,0.8)] z-10"
+            />
+            {/* Landmark dots */}
+            <div className="absolute top-[32%] left-[30%] w-1.5 h-1.5 bg-glow-gold rounded-full animate-ping" />
+            <div className="absolute top-[32%] right-[30%] w-1.5 h-1.5 bg-glow-gold rounded-full animate-ping" />
+            <div className="absolute top-[50%] left-[50%] -translate-x-1/2 w-1.5 h-1.5 bg-glow-rose rounded-full animate-ping" />
+            <div className="absolute bottom-[30%] left-[50%] -translate-x-1/2 w-1.5 h-1.5 bg-glow-gold rounded-full animate-ping" />
+          </div>
+
+          {/* 4-step progress */}
+          <div className="w-full space-y-2">
+            {[
+              'Mapping face shape & symmetry',
+              'Analysing hair type & texture',
+              'Reading skin undertone',
+              'Surfacing celebrity style matches',
+            ].map((label, i) => {
+              const state = i < analyzingStep ? 'done' : i === analyzingStep ? 'active' : 'pending'
+              return (
+                <div
+                  key={i}
+                  className={`flex items-center gap-2.5 transition-opacity duration-300 ${state === 'pending' ? 'opacity-25' : 'opacity-100'}`}
+                >
+                  <div
+                    className={`w-4 h-4 rounded-full shrink-0 flex items-center justify-center transition-all duration-500 ${
+                      state === 'done'   ? 'bg-glow-gold'                     :
+                      state === 'active' ? 'border-2 border-glow-gold bg-transparent' :
+                      'border border-white/20 bg-transparent'
+                    }`}
+                  >
+                    {state === 'done'   && <Check size={9} className="text-white" />}
+                    {state === 'active' && (
+                      <motion.div
+                        animate={{ scale: [1, 1.4, 1] }}
+                        transition={{ duration: 0.8, repeat: Infinity }}
+                        className="w-1.5 h-1.5 bg-glow-gold rounded-full"
+                      />
+                    )}
+                  </div>
+                  <span
+                    className={`font-inter text-[11px] text-left ${
+                      state === 'done'   ? 'text-glow-gold' :
+                      state === 'active' ? 'text-white'     :
+                      'text-white/65'
+                    }`}
+                  >
+                    {label}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── ERROR ──────────────────────────────────────────────────────── */}
+      {scanState === 'error' && (
+      <div className="flex flex-col items-center text-center py-4">
+          <div className="w-14 h-14 bg-red-500/10 border border-red-500/20 rounded-full flex items-center justify-center mb-4">
+            <AlertCircle size={22} className="text-red-500" />
+          </div>
+          <span className="text-red-500 text-xs font-inter uppercase tracking-widest mb-2 font-semibold">
+            Camera Access Denied
+          </span>
+          <p className="font-inter text-xs text-white/60 mb-4 max-w-xs leading-relaxed">
+            {errorMsg || 'Camera permissions were denied. Please check your browser settings or upload a photo.'}
+          </p>
+
+          {/* Upload error feedback */}
+          {uploadErrors.length > 0 && (
+            <div className="w-full bg-amber-500/8 border border-amber-500/20 rounded-xl px-3 py-2.5 mb-4 text-left">
+              <p className="font-inter text-[10px] text-amber-400 font-semibold mb-1.5">📸 Photo validation failed:</p>
+              {uploadErrors.map((err, i) => (
+                <p key={i} className="font-inter text-[10px] text-amber-300/80 leading-relaxed">• {err}</p>
+              ))}
+            </div>
+          )}
+
+          <div className="flex flex-col gap-2.5 w-full">
+            <label className="btn-outline-gold text-xs py-2.5 px-4 cursor-pointer flex items-center justify-center gap-1.5 border-white/20 hover:border-glow-gold text-white/90">
+              <UploadCloud size={14} /> Upload Photo Instead
+              <input type="file" accept="image/*" onChange={handlePhotoFallback} className="hidden" />
+            </label>
+            <button onClick={startScan} className="btn-gold text-xs py-2.5 px-6 shadow-luxury w-full">
+              Retry Camera Scan
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── RESULTS ────────────────────────────────────────────────────── */}
+      {scanState === 'results' && (
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.45 }}
+          className="flex flex-col"
+        >
+          {/* Profile header */}
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 rounded-xl overflow-hidden border border-glow-gold/30 shrink-0">
+              {capturedImage ? (
+                <img src={capturedImage} alt="Your selfie" className="w-full h-full object-cover" />
+              ) : (
+                <div className="w-full h-full bg-glow-gold/15 flex items-center justify-center">
+                  <Sparkles size={14} className="text-glow-gold" />
+                </div>
+              )}
+            </div>
+            <div>
+              <p className="font-playfair text-white text-sm font-semibold leading-tight">Analysis Complete</p>
+              <p className="font-inter text-[10px] text-glow-gold">GlowAI Match Engine</p>
+            </div>
+            {/* Verified only when at least one metric exceeded confidence threshold */}
+            {(analysisResult?.faceShape || analysisResult?.skinTone) && (
+              <span className="ml-auto shrink-0 text-[9px] font-inter text-glow-gold bg-glow-gold/15 px-2 py-0.5 rounded-full border border-glow-gold/30">
+                Verified
+              </span>
+            )}
+            {!analysisResult?.faceShape && !analysisResult?.skinTone && (
+              <span className="ml-auto shrink-0 text-[9px] font-inter text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/30">
+                Low Confidence
+              </span>
+            )}
+          </div>
+
+          {/* ── Image-derived analysis results ─────────────────────────── */}
+          <div className="space-y-1.5 mb-4">
+            {/* Face Shape */}
+            <div className="flex items-start justify-between border-b border-white/5 pb-2">
+              <span className="font-inter text-[11px] text-white/70 pt-0.5">Face Shape</span>
+              <div className="text-right">
+                <span className={`font-inter text-[11px] font-semibold ${
+                  analysisResult?.faceShape ? 'text-glow-gold' : 'text-white/65'
+                }`}>
+                  {analysisResult?.faceShape ?? 'Unable to determine'}
+                </span>
+                <p className="font-inter text-[9px] text-white/60 leading-tight mt-0.5">
+                  {analysisResult?.faceShape
+                    ? `${analysisResult.faceShapeConfidence}% confidence`
+                    : 'Retake selfie for better results'}
+                </p>
+              </div>
+            </div>
+
+            {/* Skin Tone */}
+            <div className="flex items-start justify-between border-b border-white/5 pb-2">
+              <span className="font-inter text-[11px] text-white/70 pt-0.5">Skin Tone</span>
+              <div className="text-right">
+                <span className={`font-inter text-[11px] font-semibold ${
+                  analysisResult?.skinTone ? 'text-white' : 'text-white/65'
+                }`}>
+                  {analysisResult?.skinTone
+                    ? `${analysisResult.skinTone} · ${analysisResult.skinUndertone}`
+                    : 'Unable to determine'}
+                </span>
+                <p className="font-inter text-[9px] text-white/60 leading-tight mt-0.5">
+                  {analysisResult?.skinTone
+                    ? `${analysisResult.skinConfidence}% confidence · ${analysisResult.skinUndertone} undertone`
+                    : 'Needs clearer lighting'}
+                </p>
+              </div>
+            </div>
+
+            {/* Hair */}
+            <div className="flex items-start justify-between pb-1">
+              <span className="font-inter text-[11px] text-white/70 pt-0.5">Hair Analysis</span>
+              <div className="text-right">
+                <span className="font-inter text-[11px] font-semibold text-white/65">
+                  {analysisResult?.hairVisible ? 'Pending full scan' : 'Hair not visible'}
+                </span>
+                <p className="font-inter text-[9px] text-white/60 leading-tight mt-0.5">
+                  {analysisResult?.hairVisible
+                    ? 'Complete profile for hair analysis'
+                    : 'Open hair for accurate analysis'}
+                </p>
+              </div>
             </div>
           </div>
-          <div className="ml-auto">
-            <span className="text-xs font-inter text-glow-gold bg-glow-gold/15 px-2 py-0.5 rounded-full">98% match</span>
+
+          {/* ── Explainability: why this face shape ───────────────────── */}
+          {analysisResult?.faceShape && analysisResult?.faceShapeReason && (
+            <div className="bg-white/8 border border-white/12 rounded-xl px-3 py-2.5 mb-4">
+              <p className="font-inter text-[9px] text-glow-gold mb-1 flex items-center gap-1">
+                <Info size={8} /> Why this face shape?
+              </p>
+              <p className="font-inter text-[10px] text-white/70 leading-relaxed">
+                {analysisResult.faceShapeReason}
+              </p>
+            </div>
+          )}
+
+          {/* ── Skin explainability ───────────────────────────────────── */}
+          {analysisResult?.skinTone && analysisResult?.skinReason && (
+            <div className="bg-white/8 border border-white/12 rounded-xl px-3 py-2.5 mb-4">
+              <p className="font-inter text-[9px] text-glow-gold mb-1 flex items-center gap-1">
+                <Info size={8} /> Why this skin reading?
+              </p>
+              <p className="font-inter text-[10px] text-white/70 leading-relaxed">
+                {analysisResult.skinReason}
+              </p>
+            </div>
+          )}
+
+          {/* ── No landmarks detected ─────────────────────────────────── */}
+          {analysisResult && !analysisResult.landmarksDetected && (
+            <div className="bg-amber-500/8 border border-amber-500/20 rounded-xl px-3 py-2.5 mb-4">
+              <p className="font-inter text-[10px] text-amber-400 leading-relaxed">
+                ⚠ Landmark detection failed. For best results, ensure your face is fully visible, well-lit, and the camera is at eye level. Retake your selfie to try again.
+              </p>
+            </div>
+          )}
+
+          {/* ── Next step prompt ──────────────────────────────────────── */}
+          <div className="bg-glow-gold/8 border border-glow-gold/20 rounded-xl px-3 py-2.5 mb-4">
+            <p className="font-inter text-[9px] text-glow-gold mb-0.5 flex items-center gap-1">
+              <Sparkles size={8} /> Ready for full analysis
+            </p>
+            <p className="font-inter text-[9px] text-white/70 leading-relaxed">
+              Complete your profile to receive character-inspired looks, style recommendations, and curated salon matches.
+            </p>
           </div>
-        </div>
-      </div>
+
+          {/* Actions */}
+          <div className="flex gap-2">
+            <button
+              onClick={resetScan}
+              className="btn-outline-gold flex-1 text-xs py-2 px-3 border-white/20 text-white/70 hover:text-white"
+            >
+              Rescan
+            </button>
+            <button
+              onClick={() => navigate('/profile-setup')}
+              className="btn-gold flex-1 text-xs py-2 px-3 gap-1 shadow-luxury"
+            >
+              Analyse Yours <ArrowRight size={11} />
+            </button>
+          </div>
+
+          {/* Post-analysis debug panel */}
+          {DEBUG_ENABLED && (
+            <button
+              onClick={() => setShowDebug(v => !v)}
+              className="mt-3 flex items-center gap-1.5 text-[9px] font-inter text-white/55 hover:text-white/80 transition-colors mx-auto"
+            >
+              <Bug size={9} />{showDebug ? 'Hide' : 'Show'} analysis debug
+            </button>
+          )}
+
+          {DEBUG_ENABLED && showDebug && analysisResult && (
+            <div className="mt-2 w-full bg-black/50 border border-white/10 rounded-xl p-3 text-left font-mono text-[9px] text-white/70 overflow-auto max-h-48">
+              <p className="text-[10px] font-semibold text-glow-gold mb-2">🔬 Analysis Result</p>
+              <pre className="whitespace-pre-wrap">
+                {JSON.stringify({
+                  faceShape: analysisResult.faceShape,
+                  faceShapeConfidence: analysisResult.faceShapeConfidence,
+                  faceShapeReason: analysisResult.faceShapeReason,
+                  skinTone: analysisResult.skinTone,
+                  skinUndertone: analysisResult.skinUndertone,
+                  skinConfidence: analysisResult.skinConfidence,
+                  skinReason: analysisResult.skinReason,
+                  hairVisible: analysisResult.hairVisible,
+                  landmarksDetected: analysisResult.landmarksDetected,
+                }, null, 2)}
+              </pre>
+            </div>
+          )}
+        </motion.div>
+      )}
     </motion.div>
   )
 }
@@ -119,8 +939,8 @@ const HOW_STEPS = [
   {
     step: '01',
     icon: <Heart size={22} />,
-    title: 'Create Beauty Profile',
-    desc: 'Share your hair type, skin concerns, style preferences, and budget in under 2 minutes.',
+    title: 'Create Style Profile',
+    desc: 'Share your grooming goals, skin concerns, style preferences, and budget in under 2 minutes.',
   },
   {
     step: '02',
@@ -155,14 +975,14 @@ export default function LandingPage() {
   return (
     <MainLayout>
       {/* ── Hero ─────────────────────────────────────────── */}
-      <section className="min-h-screen flex items-center pt-20 pb-16 px-4 sm:px-6 lg:px-8 bg-gradient-to-br from-glow-bg via-glow-surface to-glow-bg overflow-hidden">
-        <div className="max-w-7xl mx-auto w-full">
+      <section className="min-h-screen flex items-center pt-20 pb-16 px-4 sm:px-6 lg:px-8 bg-glow-bg overflow-hidden luxury-ambient">
+        <div className="max-w-7xl mx-auto w-full relative z-10">
           <div className="grid lg:grid-cols-2 gap-16 items-center">
             {/* Left */}
             <div className="order-2 lg:order-1">
               <motion.div initial="hidden" animate="visible" variants={fadeUp} custom={0}>
-                <span className="inline-flex items-center gap-2 bg-glow-gold/10 border border-glow-gold/30 text-glow-gold font-inter text-xs px-4 py-2 rounded-full mb-6">
-                  <Sparkles size={13} /> Mumbai's AI Beauty Concierge
+                <span className="inline-flex items-center gap-2 bg-white/65 backdrop-blur-md border border-glow-gold/25 text-glow-deep-gold font-inter text-xs px-4 py-2 rounded-full mb-6">
+                  <Sparkles size={13} /> Mumbai's AI Style Concierge
                 </span>
               </motion.div>
 
@@ -170,9 +990,9 @@ export default function LandingPage() {
                 initial="hidden" animate="visible" variants={fadeUp} custom={1}
                 className="font-playfair text-5xl sm:text-6xl lg:text-7xl font-medium text-glow-black leading-[1.08] mb-6"
               >
-                Beauty,
+                Style,
                 <br />
-                <span className="italic text-glow-gold">Curated</span>
+                <span className="italic text-glow-gold">Grooming</span>
                 <br />
                 For You
               </motion.h1>
@@ -181,7 +1001,7 @@ export default function LandingPage() {
                 initial="hidden" animate="visible" variants={fadeUp} custom={2}
                 className="font-inter text-base sm:text-lg text-glow-muted leading-relaxed mb-8 max-w-md"
               >
-                Discover salons, stylists, bridal experts, and premium beauty experiences — all personalised to your style, preferences, and budget across Mumbai.
+                Discover salons, stylists, grooming experts, bridal artists, and self-care experiences — all personalised to your style, preferences, and budget across Mumbai.
               </motion.p>
 
               <motion.div
@@ -189,11 +1009,11 @@ export default function LandingPage() {
                 className="flex flex-wrap gap-4"
               >
                 <button onClick={() => navigate('/profile-setup')} className="btn-gold text-base py-4 px-8">
-                  Create My Beauty Profile <ArrowRight size={17} />
+                  Create My Style Profile <ArrowRight size={17} />
                 </button>
                 <button className="btn-outline-gold text-base py-4 px-8 group">
-                  <div className="w-8 h-8 bg-glow-gold/15 rounded-full flex items-center justify-center group-hover:bg-white/20 transition-colors">
-                    <Play size={14} className="text-glow-gold group-hover:text-white transition-colors" />
+                  <div className="w-8 h-8 bg-glow-gold/12 rounded-full flex items-center justify-center group-hover:bg-white/10 transition-colors">
+                    <Play size={14} className="text-glow-gold transition-colors" />
                   </div>
                   Watch Demo
                 </button>
@@ -207,18 +1027,18 @@ export default function LandingPage() {
               transition={{ duration: 0.8, delay: 0.3, ease: 'easeOut' }}
               className="order-1 lg:order-2 flex justify-center lg:justify-end"
             >
-              <ProfilePreviewCard />
+              <InteractiveAIBeautyAnalyzer />
             </motion.div>
           </div>
         </div>
       </section>
 
       {/* ── Trust Metrics ────────────────────────────────── */}
-      <section className="py-14 bg-glow-black">
+      <section className="py-14 bg-glow-black border-y border-glow-gold/15">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-8">
             {TRUST.map((item) => (
-              <div key={item.label} className="text-center">
+              <div key={item.label} className="text-center lg:border-r lg:border-glow-gold/16 last:border-r-0">
                 <p className="font-playfair text-3xl sm:text-4xl font-medium text-glow-gold mb-1">
                   {item.isFloat
                     ? <span>{item.value}{item.suffix}</span>
@@ -233,12 +1053,12 @@ export default function LandingPage() {
       </section>
 
       {/* ── Featured Experiences ─────────────────────────── */}
-      <section className="py-20 px-4 sm:px-6 lg:px-8">
-        <div className="max-w-7xl mx-auto">
+      <section className="py-20 px-4 sm:px-6 lg:px-8 luxury-ambient">
+        <div className="max-w-7xl mx-auto relative z-10">
           <SectionHeader
             badge="Curated For You"
-            title="Featured Beauty Experiences"
-            subtitle="Handpicked luxury experiences personalized to Mumbai's most discerning clientele."
+            title="Featured Style Experiences"
+            subtitle="Handpicked beauty, grooming, and self-care experiences personalised for every style identity."
           />
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
             {experiences.slice(0, 3).map((exp, i) => (
@@ -262,7 +1082,7 @@ export default function LandingPage() {
       </section>
 
       {/* ── How It Works ─────────────────────────────────── */}
-      <section className="py-20 px-4 sm:px-6 lg:px-8 bg-glow-surface border-y border-glow-border">
+      <section className="py-20 px-4 sm:px-6 lg:px-8 bg-glow-champagne border-y border-glow-border">
         <div className="max-w-7xl mx-auto">
           <SectionHeader
             badge="Simple & Effortless"
@@ -281,7 +1101,7 @@ export default function LandingPage() {
                 transition={{ delay: i * 0.15, duration: 0.5 }}
                 className="text-center relative"
               >
-                <div className="w-14 h-14 bg-gradient-to-br from-glow-gold to-glow-rose rounded-2xl flex items-center justify-center text-white mx-auto mb-5 shadow-luxury">
+                <div className="w-14 h-14 bg-glow-surface border border-glow-gold/20 rounded-2xl flex items-center justify-center text-glow-gold mx-auto mb-5 shadow-luxury">
                   {step.icon}
                 </div>
                 <span className="font-inter text-xs text-glow-gold uppercase tracking-widest mb-2 block">{step.step}</span>
@@ -323,12 +1143,12 @@ export default function LandingPage() {
       </section>
 
       {/* ── Testimonials ─────────────────────────────────── */}
-      <section className="py-20 px-4 sm:px-6 lg:px-8 bg-glow-surface border-y border-glow-border">
+      <section className="py-20 px-4 sm:px-6 lg:px-8 bg-glow-champagne border-y border-glow-border">
         <div className="max-w-7xl mx-auto">
           <SectionHeader
             badge="Client Stories"
             title="Loved By Mumbai's Best"
-            subtitle="Discover how GlowAI is transforming the beauty experience for women across Mumbai."
+            subtitle="Discover how GlowAI is transforming style, grooming, and self-care experiences across Mumbai."
           />
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {TESTIMONIALS.map((t, i) => (
@@ -348,8 +1168,7 @@ export default function LandingPage() {
 
       {/* ── Final CTA ────────────────────────────────────── */}
       <section
-        className="py-28 px-4 sm:px-6 lg:px-8 relative overflow-hidden"
-        style={{ background: 'linear-gradient(135deg, #1A1A1A 0%, #2d2015 100%)' }}
+        className="py-28 px-4 sm:px-6 lg:px-8 relative overflow-hidden luxury-ambient bg-glow-black"
       >
         {/* decorative */}
         <div className="absolute top-0 right-0 w-96 h-96 bg-glow-gold/8 rounded-full blur-3xl" />
@@ -361,15 +1180,15 @@ export default function LandingPage() {
               <Sparkles size={13} /> Your Journey Starts Here
             </span>
             <h2 className="font-playfair text-4xl sm:text-5xl font-medium text-white leading-tight mb-6">
-              Your Next Beauty Experience
+              Your Next Style Experience
               <br />
               <span className="italic text-glow-gold">Starts Here</span>
             </h2>
             <p className="font-inter text-base text-white/55 leading-relaxed mb-10 max-w-lg mx-auto">
-              Join 25,000+ women who have discovered their perfect beauty match with GlowAI. Personalised, premium, and entirely yours.
+              Join 25,000+ clients who have discovered their perfect style match with GlowAI. Personalised, premium, and entirely yours.
             </p>
             <button onClick={() => navigate('/profile-setup')} className="btn-gold text-base py-4 px-10 shadow-luxury-lg">
-              Create My Beauty Profile <ArrowRight size={17} />
+              Create My Style Profile <ArrowRight size={17} />
             </button>
           </motion.div>
         </div>

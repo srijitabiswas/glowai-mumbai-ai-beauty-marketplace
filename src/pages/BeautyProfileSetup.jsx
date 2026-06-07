@@ -1,15 +1,24 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
-import { Sparkles, Upload, Check, ArrowRight, ArrowLeft, ChevronRight } from 'lucide-react'
+import { Sparkles, Upload, Check, ArrowRight, ArrowLeft } from 'lucide-react'
 import { useBeautyProfile } from '../context/BeautyProfileContext'
 import MainLayout from '../layouts/MainLayout'
 
-const STEPS = ['Profile Photo', 'Hair & Skin', 'Budget & Occasion']
+const STEPS = ['Photo', 'Style & Skin', 'Intent & Occasion', 'Inspiration', 'Budget']
 
-const HAIR_TYPES   = ['Straight', 'Wavy', 'Curly', 'Coily']
+const STYLE_PROFILES = ["Women's Styles", "Men's Styles", "Gender-Neutral Styles", "Custom Mix"]
 const SKIN_CONCERNS = ['Dry', 'Oily', 'Combination', 'Sensitive', 'Normal']
-const OCCASIONS    = ['Everyday', 'Party', 'Wedding', 'Corporate Event', 'Festival']
+const OCCASIONS    = ['Wedding', 'Reception', 'Engagement', 'Party', 'Date Night', 'College Farewell', 'Convocation', 'Office Event', 'Interview', 'Photoshoot', 'Festival', 'Vacation', 'Casual Refresh', 'Other']
+
+const INSPIRATIONS = {
+  'Iconic Looks': ['Deepika Inspired Waves', 'Veronica (Cocktail)', 'Kaira (Dear Zindagi)', 'Naina (YJHD)', 'Rani (Rocky Aur Rani)'],
+  'Modern Grooming': ['Arjun (ZNMD)', 'Bunny (YJHD)', 'Kabir', 'Rocky Randhawa', 'Harvey Specter'],
+  'Gender Neutral': ['Korean Soft Luxury', 'Old Money Aesthetic', 'Clean Professional', 'Creative Modern', 'Corporate Executive'],
+  'K-Drama': ['Hong Hae-in', 'Ri Jeong-hyeok', 'Kang Tae-moo'],
+}
+
+const BUDGETS = ['Under ₹1,000', '₹1,000–₹3,000', '₹3,000–₹5,000', '₹5,000–₹10,000', '₹10,000+']
 
 function SelectPill({ label, selected, onClick }) {
   return (
@@ -29,25 +38,17 @@ function SelectPill({ label, selected, onClick }) {
 
 export default function BeautyProfileSetup() {
   const navigate = useNavigate()
-  const { saveProfile } = useBeautyProfile()
-
-  const [step, setStep]   = useState(0)
-  const [form, setForm]   = useState({
-    photo: null,
-    photoPreview: null,
-    hairType: '',
-    skinConcern: '',
-    budget: 3000,
-    occasions: [],
-    name: '',
-  })
+  const { onboardingStep, setOnboardingStep, form, setForm, saveProfile } = useBeautyProfile()
+  const step = onboardingStep
+  const setStep = setOnboardingStep
+  const [showErrors, setShowErrors] = useState(false)
 
   const set = (key, val) => setForm((p) => ({ ...p, [key]: val }))
 
-  const toggleOccasion = (occ) => {
+  const toggleInspiration = (insp) => {
     setForm((p) => ({
       ...p,
-      occasions: p.occasions.includes(occ) ? p.occasions.filter((o) => o !== occ) : [...p.occasions, occ],
+      inspirations: p.inspirations.includes(insp) ? p.inspirations.filter((i) => i !== insp) : [...p.inspirations, insp],
     }))
   }
 
@@ -60,14 +61,35 @@ export default function BeautyProfileSetup() {
   }
 
   const handleSubmit = () => {
+    if (!canNext) return
     saveProfile(form)
     navigate('/analyzing')
   }
 
+  const handleContinue = () => {
+    if (step === 0) {
+      if (!form.name.trim() || !form.photoPreview) {
+        setShowErrors(true)
+        return
+      }
+    }
+    setStep((s) => s + 1)
+  }
+
+  const handleBack = () => {
+    if (step === 0) {
+      navigate('/')
+    } else {
+      setStep((s) => s - 1)
+    }
+  }
+
   const canNext =
-    step === 0 ? true :
-    step === 1 ? form.hairType && form.skinConcern :
-    form.occasions.length > 0
+    step === 0 ? form.name.trim() && form.photoPreview :
+    step === 1 ? form.styleProfile && form.skinConcern :
+    step === 2 ? form.styleIntent.trim() && form.occasion :
+    step === 3 ? form.inspirations.length > 0 :
+    form.budgetRange
 
   const slideVariants = {
     initial:  { opacity: 0, x: 30 },
@@ -82,30 +104,27 @@ export default function BeautyProfileSetup() {
           {/* Header */}
           <div className="text-center mb-10">
             <span className="inline-flex items-center gap-2 text-glow-gold font-inter text-xs uppercase tracking-widest mb-4">
-              <Sparkles size={12} /> AI Beauty Profile
+              <Sparkles size={12} /> AI Style Concierge
             </span>
             <h1 className="font-playfair text-4xl font-medium text-glow-black mb-3">
-              Create Your Beauty Profile
+              Craft Your Style Profile
             </h1>
             <p className="font-inter text-sm text-glow-muted">
-              Takes 2 minutes. Personalises everything.
+              We match you with beauty, grooming, and styling options tailored to your exact intent.
             </p>
           </div>
 
           {/* Progress */}
           <div className="flex items-center gap-3 mb-10">
             {STEPS.map((label, i) => (
-              <div key={i} className="flex items-center gap-3 flex-1">
-                <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-inter font-semibold transition-all duration-300 ${
+              <div key={i} className="flex items-center gap-3 flex-1" title={label}>
+                <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-xs font-inter font-semibold transition-all duration-300 ${
                   i < step ? 'bg-glow-gold text-white' :
                   i === step ? 'bg-glow-black text-white' :
                   'bg-glow-border text-glow-muted'
                 }`}>
                   {i < step ? <Check size={13} /> : i + 1}
                 </div>
-                <span className={`font-inter text-xs hidden sm:block ${i === step ? 'text-glow-black font-medium' : 'text-glow-muted'}`}>
-                  {label}
-                </span>
                 {i < STEPS.length - 1 && (
                   <div className={`flex-1 h-px transition-all duration-500 ${i < step ? 'bg-glow-gold' : 'bg-glow-border'}`} />
                 )}
@@ -120,24 +139,33 @@ export default function BeautyProfileSetup() {
               {step === 0 && (
                 <motion.div key="step0" variants={slideVariants} initial="initial" animate="animate" exit="exit" transition={{ duration: 0.3 }}>
                   <h2 className="font-playfair text-2xl font-semibold text-glow-black mb-2">Your Name & Photo</h2>
-                  <p className="font-inter text-sm text-glow-muted mb-8">Help us personalise your experience.</p>
+                  <p className="font-inter text-sm text-glow-muted mb-8">We need a selfie to analyse your face shape and features.</p>
 
                   <div className="mb-6">
-                    <label className="font-inter text-sm font-medium text-glow-black block mb-2">Your Name</label>
+                    <label className="font-inter text-sm font-medium text-glow-black block mb-2">
+                      Your Name <span className="text-red-500">*</span>
+                    </label>
                     <input
                       type="text"
                       value={form.name}
                       onChange={(e) => set('name', e.target.value)}
                       placeholder="e.g. Priya Sharma"
-                      className="w-full border border-glow-border rounded-xl px-4 py-3 font-inter text-sm text-glow-black bg-glow-surface outline-none focus:border-glow-gold transition-colors"
+                      className={`w-full border rounded-xl px-4 py-3 font-inter text-sm text-glow-black bg-glow-surface outline-none focus:border-glow-gold transition-colors ${
+                        showErrors && !form.name.trim() ? 'border-red-500' : 'border-glow-border'
+                      }`}
                     />
+                    {showErrors && !form.name.trim() && (
+                      <p className="text-red-500 text-xs mt-1.5 font-inter">Name is required</p>
+                    )}
                   </div>
 
-                  <label className="font-inter text-sm font-medium text-glow-black block mb-3">Upload Selfie <span className="text-glow-muted font-normal">(optional — helps with face shape analysis)</span></label>
+                  <label className="font-inter text-sm font-medium text-glow-black block mb-3">
+                    Upload Selfie <span className="text-red-500">*</span>
+                  </label>
                   <label className="block">
                     <input type="file" accept="image/*" onChange={handlePhoto} className="hidden" />
                     <div className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all duration-200 ${
-                      form.photoPreview ? 'border-glow-gold' : 'border-glow-border hover:border-glow-gold'
+                      form.photoPreview ? 'border-glow-gold' : showErrors && !form.photoPreview ? 'border-red-500 bg-red-50/10' : 'border-glow-border hover:border-glow-gold'
                     }`}>
                       {form.photoPreview ? (
                         <div className="flex flex-col items-center gap-3">
@@ -151,26 +179,29 @@ export default function BeautyProfileSetup() {
                           </div>
                           <div>
                             <p className="font-inter text-sm font-medium text-glow-black">Tap to upload selfie</p>
-                            <p className="font-inter text-xs text-glow-muted mt-0.5">JPG, PNG up to 10MB</p>
+                            <p className="font-inter text-xs text-glow-muted mt-0.5">Directly facing the camera, good lighting.</p>
                           </div>
                         </div>
                       )}
                     </div>
                   </label>
+                  {showErrors && !form.photoPreview && (
+                    <p className="text-red-500 text-xs mt-1.5 font-inter">Selfie upload is required</p>
+                  )}
                 </motion.div>
               )}
 
-              {/* Step 1: Hair & Skin */}
+              {/* Step 1: Style Profile & Skin */}
               {step === 1 && (
                 <motion.div key="step1" variants={slideVariants} initial="initial" animate="animate" exit="exit" transition={{ duration: 0.3 }}>
-                  <h2 className="font-playfair text-2xl font-semibold text-glow-black mb-2">Hair & Skin Type</h2>
-                  <p className="font-inter text-sm text-glow-muted mb-8">This helps us match you with the right treatments.</p>
+                  <h2 className="font-playfair text-2xl font-semibold text-glow-black mb-2">Style Catalog & Skin</h2>
+                  <p className="font-inter text-sm text-glow-muted mb-8">This determines the baseline for your aesthetic recommendations.</p>
 
                   <div className="mb-7">
-                    <label className="font-inter text-sm font-semibold text-glow-black block mb-3">Hair Type</label>
+                    <label className="font-inter text-sm font-semibold text-glow-black block mb-3">Which style catalog should GlowAI use?</label>
                     <div className="flex flex-wrap gap-2.5">
-                      {HAIR_TYPES.map((t) => (
-                        <SelectPill key={t} label={t} selected={form.hairType === t} onClick={() => set('hairType', t)} />
+                      {STYLE_PROFILES.map((t) => (
+                        <SelectPill key={t} label={t} selected={form.styleProfile === t} onClick={() => set('styleProfile', t)} />
                       ))}
                     </div>
                   </div>
@@ -186,37 +217,88 @@ export default function BeautyProfileSetup() {
                 </motion.div>
               )}
 
-              {/* Step 2: Budget & Occasion */}
+              {/* Step 2: Intent & Occasion */}
               {step === 2 && (
                 <motion.div key="step2" variants={slideVariants} initial="initial" animate="animate" exit="exit" transition={{ duration: 0.3 }}>
-                  <h2 className="font-playfair text-2xl font-semibold text-glow-black mb-2">Budget & Occasion</h2>
-                  <p className="font-inter text-sm text-glow-muted mb-8">Tell us how you like to spend on beauty.</p>
+                  <h2 className="font-playfair text-2xl font-semibold text-glow-black mb-2">Your Intent</h2>
+                  <p className="font-inter text-sm text-glow-muted mb-8">Tell us what you are trying to achieve.</p>
 
-                  <div className="mb-8">
-                    <div className="flex items-center justify-between mb-3">
-                      <label className="font-inter text-sm font-semibold text-glow-black">Monthly Beauty Budget</label>
-                      <span className="font-playfair text-lg font-semibold text-glow-gold">₹{form.budget.toLocaleString()}</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={500}
-                      max={20000}
-                      step={500}
-                      value={form.budget}
-                      onChange={(e) => set('budget', Number(e.target.value))}
-                      className="w-full accent-glow-gold h-1.5 rounded-full cursor-pointer"
+                  <div className="mb-7">
+                    <label className="font-inter text-sm font-semibold text-glow-black block mb-3">
+                      What look is on your mind?
+                    </label>
+                    <textarea
+                      value={form.styleIntent}
+                      onChange={(e) => set('styleIntent', e.target.value)}
+                      placeholder="e.g. I want a classy wedding look, or I want a corporate glow-up..."
+                      rows={3}
+                      className="w-full border border-glow-border rounded-xl px-4 py-3 font-inter text-sm text-glow-black bg-glow-surface outline-none focus:border-glow-gold transition-colors resize-none"
                     />
-                    <div className="flex justify-between mt-1.5">
-                      <span className="font-inter text-xs text-glow-muted">₹500</span>
-                      <span className="font-inter text-xs text-glow-muted">₹20,000</span>
-                    </div>
                   </div>
 
                   <div>
-                    <label className="font-inter text-sm font-semibold text-glow-black block mb-3">Occasions <span className="text-glow-muted font-normal">(select all that apply)</span></label>
-                    <div className="flex flex-wrap gap-2.5">
+                    <label className="font-inter text-sm font-semibold text-glow-black block mb-3">
+                      What is this look for?
+                    </label>
+                    <div className="flex flex-wrap gap-2.5 h-48 overflow-y-auto pr-2 pb-2">
                       {OCCASIONS.map((o) => (
-                        <SelectPill key={o} label={o} selected={form.occasions.includes(o)} onClick={() => toggleOccasion(o)} />
+                        <SelectPill key={o} label={o} selected={form.occasion === o} onClick={() => set('occasion', o)} />
+                      ))}
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+
+              {/* Step 3: Inspirations */}
+              {step === 3 && (
+                <motion.div key="step3" variants={slideVariants} initial="initial" animate="animate" exit="exit" transition={{ duration: 0.3 }}>
+                  <h2 className="font-playfair text-2xl font-semibold text-glow-black mb-2">Find Your Inspiration</h2>
+                  <p className="font-inter text-sm text-glow-muted mb-6">Select characters, movies, or aesthetics that inspire you. (Select multiple)</p>
+
+                  <div className="max-h-[400px] overflow-y-auto pr-2 pb-4 space-y-6">
+                    {Object.entries(INSPIRATIONS).map(([category, items]) => (
+                      <div key={category}>
+                        <h3 className="font-inter text-xs uppercase tracking-widest text-glow-gold mb-3">{category}</h3>
+                        <div className="flex flex-wrap gap-2.5">
+                          {items.map((item) => (
+                            <SelectPill 
+                              key={item} 
+                              label={item} 
+                              selected={form.inspirations.includes(item)} 
+                              onClick={() => toggleInspiration(item)} 
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </motion.div>
+              )}
+
+              {/* Step 4: Budget */}
+              {step === 4 && (
+                <motion.div key="step4" variants={slideVariants} initial="initial" animate="animate" exit="exit" transition={{ duration: 0.3 }}>
+                  <h2 className="font-playfair text-2xl font-semibold text-glow-black mb-2">Budget</h2>
+                  <p className="font-inter text-sm text-glow-muted mb-8">This helps us match you with the right salons and treatments.</p>
+
+                  <div>
+                    <label className="font-inter text-sm font-semibold text-glow-black block mb-3">What is your budget for this look?</label>
+                    <div className="flex flex-col gap-3">
+                      {BUDGETS.map((b) => (
+                        <button
+                          key={b}
+                          onClick={() => set('budgetRange', b)}
+                          className={`w-full text-left px-5 py-4 rounded-xl border font-inter text-sm transition-all duration-200 ${
+                            form.budgetRange === b
+                              ? 'bg-glow-gold/10 border-glow-gold text-glow-black font-semibold'
+                              : 'bg-glow-surface border-glow-border text-glow-muted hover:border-glow-gold'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span>{b}</span>
+                            {form.budgetRange === b && <Check size={16} className="text-glow-gold" />}
+                          </div>
+                        </button>
                       ))}
                     </div>
                   </div>
@@ -227,29 +309,25 @@ export default function BeautyProfileSetup() {
             {/* Navigation */}
             <div className="flex items-center justify-between mt-10 pt-6 border-t border-glow-border">
               <button
-                onClick={() => setStep((s) => s - 1)}
-                disabled={step === 0}
-                className={`flex items-center gap-2 font-inter text-sm transition-all duration-200 ${
-                  step === 0 ? 'text-glow-border pointer-events-none' : 'text-glow-muted hover:text-glow-black'
-                }`}
+                onClick={handleBack}
+                className="flex items-center gap-2 font-inter text-sm text-glow-muted hover:text-glow-black transition-all duration-200"
               >
                 <ArrowLeft size={15} /> Back
               </button>
 
               {step < STEPS.length - 1 ? (
                 <button
-                  onClick={() => canNext && setStep((s) => s + 1)}
-                  className={`btn-gold ${!canNext ? 'opacity-40 pointer-events-none' : ''}`}
+                  onClick={handleContinue}
+                  className={`btn-gold ${!canNext ? 'opacity-40 cursor-not-allowed' : ''}`}
                 >
                   Continue <ArrowRight size={15} />
                 </button>
               ) : (
                 <button
                   onClick={handleSubmit}
-                  disabled={!canNext}
-                  className={`btn-gold text-base py-3.5 px-8 ${!canNext ? 'opacity-40 pointer-events-none' : ''}`}
+                  className={`btn-gold text-base py-3.5 px-8 ${!canNext ? 'opacity-40 cursor-not-allowed' : ''}`}
                 >
-                  <Sparkles size={16} /> Analyse My Beauty Profile
+                  <Sparkles size={16} /> Generate My Look
                 </button>
               )}
             </div>

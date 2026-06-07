@@ -6,11 +6,11 @@ import MainLayout from '../layouts/MainLayout'
 import SectionHeader from '../components/SectionHeader'
 import { generateBridalTimeline } from '../services/aiService'
 
-const STYLES = ['Classic Indian', 'Modern Fusion', 'Minimalist', 'Vintage Glam', 'Bohemian']
+const STYLES = ['Classic Indian', 'Modern Fusion', 'Minimalist', 'Vintage Glam', 'Bohemian', 'Custom Bridal Style']
 
 export default function BridalPlanner() {
   const navigate = useNavigate()
-  const [form, setForm] = useState({ weddingDate: '', budget: 50000, style: '' })
+  const [form, setForm] = useState({ weddingDate: '', budget: 50000, style: '', customStyle: '' })
   const [timeline, setTimeline] = useState(null)
   const [loading, setLoading]   = useState(false)
   const [tasks, setTasks]       = useState({})
@@ -18,9 +18,10 @@ export default function BridalPlanner() {
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }))
 
   const handleGenerate = async () => {
-    if (!form.weddingDate || !form.style) return
+    if (!form.weddingDate || !form.style || (form.style === 'Custom Bridal Style' && !form.customStyle.trim())) return
     setLoading(true)
-    const data = await generateBridalTimeline(form.weddingDate, form.budget, form.style)
+    const stylePreference = form.style === 'Custom Bridal Style' ? form.customStyle.trim() : form.style
+    const data = await generateBridalTimeline(form.weddingDate, form.budget, stylePreference)
     setTimeline(data)
     const init = {}
     data.timeline.forEach((phase, pi) => phase.tasks.forEach((_, ti) => { init[`${pi}-${ti}`] = false }))
@@ -78,10 +79,25 @@ export default function BridalPlanner() {
               </div>
             </div>
 
+            {form.style === 'Custom Bridal Style' && (
+              <div className="mb-6">
+                <label className="font-inter text-sm font-semibold text-glow-black block mb-2">
+                  What bridal look are you imagining?
+                </label>
+                <textarea
+                  value={form.customStyle}
+                  onChange={(e) => set('customStyle', e.target.value)}
+                  rows={4}
+                  placeholder="Royal Rajasthani Bride, South Indian Temple Bridal, Modern Bollywood Bride, Korean Minimal Bridal..."
+                  className="w-full border border-glow-border rounded-xl px-4 py-3 font-inter text-sm text-glow-black bg-glow-surface outline-none focus:border-glow-gold transition-colors resize-none"
+                />
+              </div>
+            )}
+
             <button
               onClick={handleGenerate}
-              disabled={!form.weddingDate || !form.style || loading}
-              className={`btn-gold w-full py-4 text-base ${(!form.weddingDate || !form.style || loading) ? 'opacity-50 pointer-events-none' : ''}`}
+              disabled={!form.weddingDate || !form.style || (form.style === 'Custom Bridal Style' && !form.customStyle.trim()) || loading}
+              className={`btn-gold w-full py-4 text-base ${(!form.weddingDate || !form.style || (form.style === 'Custom Bridal Style' && !form.customStyle.trim()) || loading) ? 'opacity-50 pointer-events-none' : ''}`}
             >
               {loading ? (
                 <span className="flex items-center gap-2">

@@ -5,6 +5,7 @@ import { Calculator, Star, ArrowRight, TrendingDown, Award, Sparkles, Check } fr
 import MainLayout from '../layouts/MainLayout'
 import SectionHeader from '../components/SectionHeader'
 import { optimizeBudget } from '../services/aiService'
+import { MUMBAI_AREA_GROUPS } from '../data/mumbaiAreas'
 
 const ALL_SERVICES = ['Haircut', 'Hair Color', 'Facial', 'Nail Art', 'Waxing', 'Makeup', 'Body Polish', 'Massage']
 
@@ -64,8 +65,12 @@ export default function BudgetOptimizer() {
                   onChange={(e) => setLocation(e.target.value)}
                   className="w-full border border-glow-border rounded-xl px-4 py-3 font-inter text-sm text-glow-black bg-glow-surface outline-none focus:border-glow-gold transition-colors"
                 >
-                  {['Bandra', 'Andheri', 'Juhu', 'Powai', 'Lower Parel', 'South Mumbai'].map((l) => (
-                    <option key={l}>{l}</option>
+                  {MUMBAI_AREA_GROUPS.map((group) => (
+                    <optgroup key={group.region} label={group.region}>
+                      {group.areas.map((area) => (
+                        <option key={area} value={area}>{area}</option>
+                      ))}
+                    </optgroup>
                   ))}
                 </select>
               </div>

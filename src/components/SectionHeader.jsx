@@ -6,7 +6,7 @@ export default function SectionHeader({ badge, title, subtitle, center = true, d
           {badge}
         </span>
       )}
-      <h2 className={`font-playfair text-3xl md:text-4xl font-medium leading-tight mb-4 ${dark ? 'text-white' : 'text-glow-black'}`}>
+      <h2 className={`font-playfair text-3xl md:text-4xl font-medium leading-tight mb-4 ${dark ? 'text-white' : 'text-glow-ink'}`}>
         {title}
       </h2>
       {subtitle && (
