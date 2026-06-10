@@ -1,4 +1,21 @@
-import { useState, useRef, useEffect } from 'react'
+/**
+ * GlowChatbot.jsx
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Floating SSE-streaming chat widget for the GlowAI Glow concierge.
+ *
+ * Production fixes applied:
+ *
+ *  [MEDIUM-9] The [DONE] break only exited the inner `lines` for-loop, leaving
+ *    the outer `while(true)` reader loop running until the server closed the
+ *    connection. Fixed: `streamDone` flag breaks the outer loop immediately
+ *    when [DONE] is received.
+ *
+ *  [MEDIUM-10] No request timeout. If the backend hangs, `isTyping` stays true
+ *    forever. Fixed: AbortController with 30-second timeout. On abort the
+ *    placeholder bot message is replaced with a timeout error.
+ */
+
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Send, MapPin, Sparkles, Loader2, Trash2, MessageSquare, X } from 'lucide-react'
 import { useBeautyProfile } from '../context/BeautyProfileContext'
@@ -6,262 +23,254 @@ import { useAuth } from '../context/AuthContext'
 import ChatMessage from './ChatMessage'
 import { MUMBAI_AREAS } from '../data/mumbaiAreas'
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'
+
+const CHAT_TIMEOUT_MS = 30_000  // 30 seconds
 
 function firstValue(...values) {
-  return values.find(value => value !== undefined && value !== null && value !== '') || null
+  return values.find(v => v !== undefined && v !== null && v !== '') || null
 }
 
+const DEFAULT_GREETING = (name) =>
+  name
+    ? `Hi ${name}! I'm Glow ✨\n\nTell me what occasion you're preparing for, your budget, and what kind of look you're imagining. Like: *'I have a wedding next month, budget ₹4000'*`
+    : `Hi! I'm Glow ✨\n\nTell me what occasion you're preparing for, your budget, and what kind of look you're imagining. Like: *'I have a wedding next month, budget ₹4000'*`
+
 export default function GlowChatbot() {
-  const { 
-    isChatOpen, 
-    setIsChatOpen, 
-    chatHistory, 
-    setChatHistory,
-    profile,
-    form, 
-    setForm, 
-    analysis 
+  const {
+    isChatOpen, setIsChatOpen,
+    chatHistory, setChatHistory,
+    profile, form, setForm, analysis,
   } = useBeautyProfile()
-  
+
   const { user } = useAuth()
-  const [input, setInput] = useState('')
-  const [isTyping, setIsTyping] = useState(false)
-  const [locationState, setLocationState] = useState('pending') // pending, granted, denied
-  const [coords, setCoords] = useState(null)
+  const [input, setInput]               = useState('')
+  const [isTyping, setIsTyping]         = useState(false)
+  const [locationState, setLocationState] = useState('pending')  // pending | granted | denied
+  const [coords, setCoords]             = useState(null)
   const [selectedArea, setSelectedArea] = useState('')
-  
-  const messagesEndRef = useRef(null)
-  const areas = MUMBAI_AREAS
-  
+
+  const messagesEndRef  = useRef(null)
+  const abortRef        = useRef(null)   // holds the current AbortController
+  const areas           = MUMBAI_AREAS
+
   const suggestedPrompts = [
-    { label: '✨ Wedding Look', text: 'I have a wedding coming up next month and want to plan my look.' },
-    { label: '✨ Korean Glow', text: 'Recommend a dewy Korean Glass Skin look for my profile.' },
-    { label: '✨ Bridal Package', text: 'What does a complete bridal package include for hair & makeup?' },
+    { label: '✨ Wedding Look',      text: 'I have a wedding coming up next month and want to plan my look.' },
+    { label: '✨ Korean Glow',       text: 'Recommend a dewy Korean Glass Skin look for my profile.' },
+    { label: '✨ Bridal Package',    text: 'What does a complete bridal package include for hair & makeup?' },
     { label: '✨ Budget Under ₹3000', text: 'Suggest top styling recommendations and salons under ₹3000.' },
     { label: '✨ Reception Styling', text: 'I need an elegant styling plan for a reception next week.' },
-    { label: '✨ Hair Makeover', text: 'Recommend a hair makeover look inspired by my face shape and hair texture.' }
+    { label: '✨ Hair Makeover',     text: 'Recommend a hair makeover look inspired by my face shape and hair texture.' },
   ]
 
-  const scrollToBottom = () => {
+  const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }
+  }, [])
 
-  // Auto-scroll on new messages
-  useEffect(() => {
-    scrollToBottom()
-  }, [chatHistory, isTyping])
+  useEffect(() => { scrollToBottom() }, [chatHistory, isTyping, scrollToBottom])
 
   // Sync history when user logs in/out
   useEffect(() => {
     const fetchHistory = async () => {
       if (!user?.id) {
-        // Reset to default greeting for guests
-        setChatHistory([
-          {
-            id: 'init',
-            isUser: false,
-            text: "Hi! I'm Glow ✨\n\nTell me what occasion you're preparing for, your budget, and what kind of look you're imagining. Like: *'I have a wedding next month, budget ₹4000'*",
-          }
-        ])
+        setChatHistory([{ id: 'init', isUser: false, text: DEFAULT_GREETING(null) }])
         return
       }
-
       try {
         const response = await fetch(`${API_BASE}/api/chat/history/${user.id}`)
         if (response.ok) {
           const data = await response.json()
-          if (data && data.length > 0) {
-            setChatHistory(data)
-          } else {
-            setChatHistory([
-              {
-                id: 'init',
-                isUser: false,
-                text: `Hi ${user.name}! I'm Glow ✨\n\nTell me what occasion you're preparing for, your budget, and what kind of look you're imagining. Like: *'I have a wedding next month, budget ₹4000'*`,
-              }
-            ])
-          }
+          setChatHistory(
+            data?.length > 0
+              ? data
+              : [{ id: 'init', isUser: false, text: DEFAULT_GREETING(user.name) }]
+          )
         }
       } catch (err) {
-        console.error('Error fetching chat history:', err)
+        console.error('[GlowChatbot] fetch history error:', err)
       }
     }
-
     fetchHistory()
-  }, [user?.id, setChatHistory, user?.name])
+  }, [user?.id, user?.name, setChatHistory])
 
-  const requestLocation = () => {
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          setCoords({ lat: position.coords.latitude, lng: position.coords.longitude })
-          setLocationState('granted')
-        },
-        () => {
-          setLocationState('denied')
-        }
-      )
-    } else {
-      setLocationState('denied')
-    }
-  }
+  const requestLocation = useCallback(() => {
+    if (!navigator.geolocation) { setLocationState('denied'); return }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude })
+        setLocationState('granted')
+      },
+      () => setLocationState('denied')
+    )
+  }, [])
 
-  const handleSend = async (customText) => {
-    const textToSend = customText || input
-    if (typeof textToSend !== 'string' || !textToSend.trim()) return
+  const handleSend = useCallback(async (customText) => {
+    const textToSend = typeof customText === 'string' ? customText.trim() : input.trim()
+    if (!textToSend) return
+
+    // Cancel any in-flight request
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
 
     setInput('')
-    
-    // Request location on first interaction if pending
-    if (locationState === 'pending') {
-      requestLocation()
-    }
 
-    // Save intent to context if not set
-    if (!form.userIntent) {
-      setForm(prev => ({ ...prev, userIntent: textToSend }))
-    }
+    if (locationState === 'pending') requestLocation()
+    if (!form.userIntent) setForm(prev => ({ ...prev, userIntent: textToSend }))
 
-    // Append user message
     const userMsgId = `user_${Date.now()}`
     setChatHistory(prev => [...prev, { id: userMsgId, isUser: true, text: textToSend }])
     setIsTyping(true)
 
+    const botMsgId = `bot_${Date.now()}`
+
+    // Timeout: after CHAT_TIMEOUT_MS abort and show error
+    const timeoutId = setTimeout(() => {
+      controller.abort()
+    }, CHAT_TIMEOUT_MS)
+
     try {
       const profileState = {
-        name: firstValue(user?.name, form?.name, profile?.name, 'GlowAI guest') || '',
-        faceShape: firstValue(
-          analysis?.faceShape?.technicalClassification,
-          analysis?.faceShape,
-          profile?.faceShape,
-          profile?.faceAnalysis?.technicalClassification
-        ) || '',
-        skinAnalysis: firstValue(
-          analysis?.skinAnalysis?.technicalClassification,
-          analysis?.skinTone,
-          profile?.skinAnalysis?.technicalClassification,
-          profile?.skinTone
-        ) || '',
-        hairAnalysis: firstValue(
-          analysis?.hairAnalysis?.technicalClassification,
-          analysis?.hairAnalysis,
-          profile?.hairAnalysis?.technicalClassification,
-          profile?.hairType
-        ) || '',
-        userIntent: form.userIntent || textToSend,
-        location: selectedArea || profile?.location || (locationState === 'granted' ? 'Current GPS location' : ''),
-        budget: firstValue(form.budgetRange, profile?.budgetRange, profile?.budget) || '',
-        occasion: firstValue(form.occasion, profile?.occasion) || '',
-        stylePreference: firstValue(form.styleProfile, profile?.stylePreference, profile?.styleProfile) || ''
+        name:            firstValue(user?.name, form?.name, profile?.name, 'GlowAI guest') || '',
+        faceShape:       firstValue(analysis?.faceShape?.technicalClassification, analysis?.faceShape, profile?.faceShape, profile?.faceAnalysis?.technicalClassification) || '',
+        skinAnalysis:    firstValue(analysis?.skinAnalysis?.technicalClassification, analysis?.skinTone, profile?.skinAnalysis?.technicalClassification, profile?.skinTone) || '',
+        hairAnalysis:    firstValue(analysis?.hairAnalysis?.technicalClassification, analysis?.hairAnalysis, profile?.hairAnalysis?.technicalClassification, profile?.hairType) || '',
+        userIntent:      form.userIntent || textToSend,
+        location:        selectedArea || profile?.location || (locationState === 'granted' ? 'Current GPS location' : ''),
+        budget:          firstValue(form.budgetRange, profile?.budgetRange, profile?.budget) || '',
+        occasion:        firstValue(form.occasion, profile?.occasion) || '',
+        stylePreference: firstValue(form.styleProfile, profile?.stylePreference, profile?.styleProfile) || '',
       }
 
       const response = await fetch(`${API_BASE}/api/chat`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           userId: user?.id || null,
           message: textToSend,
           profileState,
-          coords
-        })
+          coords,
+        }),
       })
 
       if (!response.ok) {
-        throw new Error('Glow chat request failed')
+        // Non-SSE error from backend (e.g. 503 when key missing in production)
+        let errMsg = 'Glow is having trouble connecting right now. Please try again in a moment.'
+        try {
+          const errBody = await response.json()
+          if (errBody?.error) errMsg = errBody.error
+          if (errBody?.message) errMsg = errBody.message
+        } catch (_) { /* ignore parse error */ }
+        setChatHistory(prev => [...prev, { id: botMsgId, isUser: false, text: errMsg }])
+        return
       }
 
       if (!response.body) {
-        throw new Error('Glow chat streaming is unavailable in this browser')
+        throw new Error('SSE streaming is unavailable in this browser')
       }
 
-      // Create bot typing placeholder
-      const botMsgId = `bot_${Date.now()}`
+      // Add bot placeholder — will be updated progressively by the stream
       setChatHistory(prev => [...prev, { id: botMsgId, isUser: false, text: '' }])
 
-      // Parse SSE stream
-      const reader = response.body.getReader()
+      const reader  = response.body.getReader()
       const decoder = new TextDecoder('utf-8')
-      let botText = ''
+      let botText    = ''
+      let streamDone = false   // FIXED: flag to break outer reader loop on [DONE]
 
-      while (true) {
+      while (!streamDone) {
         const { done, value } = await reader.read()
         if (done) break
 
-        const chunk = decoder.decode(value)
+        const chunk = decoder.decode(value, { stream: true })
         const lines = chunk.split('\n')
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const dataStr = line.replace('data: ', '').trim()
-            if (dataStr === '[DONE]') {
+          if (!line.startsWith('data: ')) continue
+
+          const dataStr = line.slice(6).trim()
+
+          if (dataStr === '[DONE]') {
+            streamDone = true   // FIXED: exits the outer while loop next iteration
+            break
+          }
+
+          try {
+            const parsed = JSON.parse(dataStr)
+
+            if (parsed.text) {
+              botText += parsed.text
+              setChatHistory(prev => {
+                const copy = [...prev]
+                const idx  = copy.findIndex(m => m.id === botMsgId)
+                if (idx !== -1) copy[idx] = { ...copy[idx], text: botText }
+                return copy
+              })
+            }
+
+            if (parsed.error) {
+              setChatHistory(prev => {
+                const copy = [...prev]
+                const idx  = copy.findIndex(m => m.id === botMsgId)
+                if (idx !== -1) copy[idx] = { ...copy[idx], text: parsed.error }
+                return copy
+              })
+              streamDone = true
               break
             }
-            try {
-              const parsed = JSON.parse(dataStr)
-              if (parsed.text) {
-                botText += parsed.text
-                // Stream text changes to UI
-                setChatHistory(prev => {
-                  const copy = [...prev]
-                  const idx = copy.findIndex(m => m.id === botMsgId)
-                  if (idx !== -1) {
-                    copy[idx] = { ...copy[idx], text: botText }
-                  }
-                  return copy
-                })
-              } else if (parsed.error) {
-                botText = parsed.error
-                setChatHistory(prev => {
-                  const copy = [...prev]
-                  const idx = copy.findIndex(m => m.id === botMsgId)
-                  if (idx !== -1) {
-                    copy[idx] = { ...copy[idx], text: botText }
-                  }
-                  return copy
-                })
-              }
-            } catch (err) {
-              // ignore partial lines
-            }
+          } catch (_) {
+            // Ignore partial / malformed SSE line
           }
         }
       }
+
     } catch (error) {
-      console.error(error)
-      setChatHistory(prev => [
-        ...prev,
-        { id: `err_${Date.now()}`, isUser: false, text: "Glow is having trouble connecting right now. Please try again in a moment." }
-      ])
+      clearTimeout(timeoutId)
+
+      const isAbort   = error.name === 'AbortError'
+      const isTimeout = isAbort && !controller.signal.reason?.includes?.('user')
+
+      const errText = isAbort
+        ? (isTimeout
+            ? 'Glow took too long to respond. Please try again.'
+            : 'Request cancelled.')
+        : 'Glow is having trouble connecting right now. Please try again in a moment.'
+
+      // Update placeholder if it was added, otherwise append new error message
+      setChatHistory(prev => {
+        const copy   = [...prev]
+        const idx    = copy.findIndex(m => m.id === botMsgId)
+        const errMsg = { id: `err_${Date.now()}`, isUser: false, text: errText }
+        if (idx !== -1) {
+          copy[idx] = { ...copy[idx], text: errText }
+          return copy
+        }
+        return [...copy, errMsg]
+      })
     } finally {
+      clearTimeout(timeoutId)
       setIsTyping(false)
     }
-  }
+  }, [
+    input, locationState, form, profile, analysis, user,
+    selectedArea, coords, setChatHistory, setForm, requestLocation,
+  ])
 
-  const handleClear = async () => {
-    setChatHistory([
-      {
-        id: 'init',
-        isUser: false,
-        text: "Hi! I'm Glow ✨\n\nTell me what occasion you're preparing for, your budget, and what kind of look you're imagining. Like: *'I have a wedding next month, budget ₹4000'*",
-      }
-    ])
+  const handleClear = useCallback(async () => {
+    abortRef.current?.abort()
+    setChatHistory([{ id: 'init', isUser: false, text: DEFAULT_GREETING(user?.name) }])
     if (user?.id) {
       try {
-        await fetch(`${API_BASE}/api/chat/history/${user.id}`, {
-          method: 'DELETE'
-        })
+        await fetch(`${API_BASE}/api/chat/history/${user.id}`, { method: 'DELETE' })
       } catch (err) {
-        console.error('Failed to clear backend chat memory:', err)
+        console.error('[GlowChatbot] Failed to clear backend chat history:', err)
       }
     }
-  }
+  }, [user?.id, user?.name, setChatHistory])
 
   return (
     <div className="fixed bottom-4 right-4 sm:bottom-6 sm:right-6 z-[2147483000] flex flex-col items-end">
-      {/* Expanded Chat Drawer */}
+      {/* ── Expanded Chat Drawer ── */}
       <AnimatePresence>
         {isChatOpen && (
           <motion.div
@@ -284,8 +293,6 @@ export default function GlowChatbot() {
                   </p>
                 </div>
               </div>
-              
-              {/* Header Actions */}
               <div className="flex items-center gap-2">
                 <button
                   onClick={handleClear}
@@ -303,7 +310,7 @@ export default function GlowChatbot() {
               </div>
             </div>
 
-            {/* Geolocation Warning / Picker */}
+            {/* Location picker (shown when GPS denied and no area selected) */}
             {locationState === 'denied' && !selectedArea && (
               <div className="bg-amber-500/10 border-b border-amber-500/20 p-3 shrink-0">
                 <p className="font-inter text-[10px] text-amber-200/80 mb-1.5">Where in Mumbai are you looking?</p>
@@ -326,27 +333,27 @@ export default function GlowChatbot() {
               {chatHistory.map(msg => (
                 <ChatMessage key={msg.id} message={msg.text} isUser={msg.isUser} />
               ))}
-              
               {isTyping && (
-                <motion.div 
-                  initial={{ opacity: 0 }} 
-                  animate={{ opacity: 1 }} 
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
                   className="flex gap-2 items-center text-glow-gold/75 text-xs font-inter ml-11"
                 >
-                  <Loader2 size={11} className="animate-spin" /> Glow is typing...
+                  <Loader2 size={11} className="animate-spin" /> Glow is typing…
                 </motion.div>
               )}
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Suggested Prompts (Pills) */}
+            {/* Suggested Prompts */}
             <div className="px-4 py-2 border-t border-white/5 bg-black/20 shrink-0">
               <div className="flex gap-2 overflow-x-auto scrollbar-none snap-x snap-mandatory">
-                {suggestedPrompts.map((prompt) => (
+                {suggestedPrompts.map(prompt => (
                   <button
                     key={prompt.label}
                     onClick={() => handleSend(prompt.text)}
-                    className="flex-shrink-0 snap-align-start px-3 py-1 bg-white/5 border border-white/10 hover:border-glow-gold/40 hover:bg-white/10 rounded-full font-inter text-[10px] text-white/80 hover:text-white transition-all whitespace-nowrap"
+                    disabled={isTyping}
+                    className="flex-shrink-0 snap-align-start px-3 py-1 bg-white/5 border border-white/10 hover:border-glow-gold/40 hover:bg-white/10 rounded-full font-inter text-[10px] text-white/80 hover:text-white transition-all whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     {prompt.label}
                   </button>
@@ -354,9 +361,9 @@ export default function GlowChatbot() {
               </div>
             </div>
 
-            {/* Input Form */}
+            {/* Input */}
             <div className="p-3 border-t border-white/10 bg-white/5 shrink-0">
-              <form 
+              <form
                 onSubmit={(e) => { e.preventDefault(); handleSend() }}
                 className="relative flex items-center"
               >
@@ -364,8 +371,9 @@ export default function GlowChatbot() {
                   type="text"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
-                  placeholder="Ask Glow anything about beauty, styles..."
-                  className="w-full bg-black/40 border border-white/15 rounded-full py-2.5 pl-4 pr-12 font-inter text-xs text-white placeholder-white/25 focus:outline-none focus:border-glow-gold transition-colors"
+                  placeholder="Ask Glow anything about beauty, styles…"
+                  disabled={isTyping}
+                  className="w-full bg-black/40 border border-white/15 rounded-full py-2.5 pl-4 pr-12 font-inter text-xs text-white placeholder-white/25 focus:outline-none focus:border-glow-gold transition-colors disabled:opacity-60"
                 />
                 <button
                   type="submit"
@@ -375,23 +383,27 @@ export default function GlowChatbot() {
                   <Send size={13} className="ml-0.5" />
                 </button>
               </form>
-              
-              {/* Location Indicator Footer */}
+
+              {/* Location indicator */}
               <div className="flex items-center justify-between mt-2 px-1 text-[9px] text-white/30 font-inter">
                 <div className="flex items-center gap-1">
                   <MapPin size={9} className={locationState === 'granted' || selectedArea ? 'text-glow-gold' : 'text-white/30'} />
                   <span>
-                    {locationState === 'granted' ? 'GPS Active' : selectedArea ? `${selectedArea}, Mumbai` : 'Location Pending'}
+                    {locationState === 'granted'
+                      ? 'GPS Active'
+                      : selectedArea
+                        ? `${selectedArea}, Mumbai`
+                        : 'Location Pending'}
                   </span>
                 </div>
-                <span>GlowAI Concierge v1.1</span>
+                <span>GlowAI Concierge v1.2</span>
               </div>
             </div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Floating Action Button Launcher */}
+      {/* Floating Action Button */}
       <motion.button
         whileHover={{ scale: 1.05 }}
         whileTap={{ scale: 0.95 }}

@@ -15,6 +15,8 @@ import BookingPage        from './pages/BookingPage'
 import BookingConfirmation from './pages/BookingConfirmation'
 import Login              from './pages/Auth/Login'
 import Register           from './pages/Auth/Register'
+import ForgotPassword     from './pages/Auth/ForgotPassword'
+import ResetPassword      from './pages/Auth/ResetPassword'
 import UserProfile        from './pages/UserProfile'
 import CompareReports     from './pages/CompareReports'
 import GlowChatbot        from './components/GlowChatbot'
@@ -28,6 +30,8 @@ export default function App() {
           <Route path="/"                  element={<LandingPage />} />
           <Route path="/login"             element={<Login />} />
           <Route path="/register"          element={<Register />} />
+          <Route path="/forgot-password"   element={<ForgotPassword />} />
+          <Route path="/reset-password"    element={<ResetPassword />} />
           <Route path="/profile"           element={<UserProfile />} />
           <Route path="/compare"           element={<CompareReports />} />
           <Route path="/profile-setup"     element={<BeautyProfileSetup />} />

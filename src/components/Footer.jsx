@@ -59,7 +59,7 @@ export default function Footer() {
         </div>
 
         <div className="border-t border-glow-gold/12 mt-12 pt-8 flex flex-col sm:flex-row items-center justify-between gap-3">
-          <p className="font-inter text-xs text-white/35">© 2025 GlowAI Mumbai. All rights reserved.</p>
+          <p className="font-inter text-xs text-white/35">© 2026 GlowAI Mumbai. All rights reserved.</p>
           <p className="font-inter text-xs text-white/35 flex items-center gap-1.5">
             Made with <span className="text-glow-gold">♥</span> in Mumbai
           </p>

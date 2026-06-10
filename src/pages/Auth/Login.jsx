@@ -87,7 +87,12 @@ export default function Login() {
                   />
                   <span className="font-inter text-sm text-glow-muted">Remember me</span>
                 </label>
-                <a href="#" className="font-inter text-sm text-glow-gold hover:underline">Forgot password?</a>
+                <Link
+                  to="/forgot-password"
+                  className="font-inter text-sm text-glow-gold hover:underline"
+                >
+                  Forgot password?
+                </Link>
               </div>
 
               <button 

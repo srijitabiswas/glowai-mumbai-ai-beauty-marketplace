@@ -1,3 +1,42 @@
+/**
+ * chatController.js
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Streaming SSE chat controller for the GlowAI Glow concierge.
+ *
+ * Production fixes applied:
+ *
+ *  [CRITICAL-1] SSE headers were set BEFORE the API-key check. When the key
+ *    was missing in production, the code called res.status(503).json() on an
+ *    already-flushed SSE stream, throwing "Cannot set headers after they are
+ *    sent." The 503 was silently swallowed; the client received an empty open
+ *    stream. Fixed: all branching logic (key check, dev fallback, OpenAI call)
+ *    now runs BEFORE res.setHeader / res.flushHeaders().
+ *
+ *  [CRITICAL-3] Full chat history sent to OpenAI on every message with no cap.
+ *    Fixed: apiMessages trimmed to last MAX_HISTORY_MESSAGES (20) before the
+ *    OpenAI call. System prompt is excluded from this count.
+ *
+ *  [HIGH-4] OpenAI SDK instantiated inside the request handler on every call.
+ *    Fixed: singleton openaiClient created once at module load, guarded by
+ *    config.openaiEnabled.
+ *
+ *  [HIGH-5] No typed OpenAI error handling. A 401 bad-key or 429 rate-limit
+ *    produced the same generic "trouble connecting" message.
+ *    Fixed: catch branch inspects err.status and err.code to emit specific,
+ *    actionable SSE error messages per error type.
+ *
+ *  [HIGH-6] Dev fallback local reply sent as one giant SSE chunk. Inconsistent
+ *    with the streamed OpenAI path; caused UI to feel "stuck" then suddenly
+ *    appear. Fixed: local reply is sentence-split and streamed in 40 ms
+ *    intervals to match the streaming UX.
+ *
+ *  [MEDIUM-7] res.flushHeaders() called without guarding headersSent.
+ *    Fixed: guard added before flushHeaders().
+ *
+ *  [LOW-12] No max_tokens set. Fixed: max_tokens: 1024 added to prevent
+ *    runaway long responses.
+ */
+
 import { OpenAI } from 'openai'
 import { config, isProduction } from '../config/env.js'
 import { db } from '../models/inMemoryDb.js'
@@ -5,42 +44,51 @@ import { fetchGooglePlacesSalons, geocodeAddress } from '../services/googlePlace
 import { rankSalons } from '../services/salonMatchingEngine.js'
 import { salons as localSalons } from '../data/salons.js'
 
+// ─── OpenAI singleton ────────────────────────────────────────────────────────
+// Created once at module load. null when key is absent (dev / mis-configured).
+const openaiClient = config.openaiEnabled
+  ? new OpenAI({ apiKey: config.openaiApiKey })
+  : null
+
+// Maximum number of past messages forwarded to OpenAI per request.
+// Prevents unbounded token growth in long sessions.
+const MAX_HISTORY_MESSAGES = 20
+
+// ─── Service & intent helpers ─────────────────────────────────────────────────
+
 const SERVICE_ALIASES = [
-  { intent: 'waxing', terms: ['wax', 'waxing', 'full body waxing', 'body wax', 'underarm'] },
+  { intent: 'waxing',   terms: ['wax', 'waxing', 'full body waxing', 'body wax', 'underarm'] },
   { intent: 'threading', terms: ['threading', 'eyebrow', 'brows', 'hd brows'] },
-  { intent: 'facial', terms: ['facial', 'cleanup', 'clean-up', 'skin glow', 'glass skin', 'hydrafacial'] },
-  { intent: 'hair', terms: ['hair', 'haircut', 'cut', 'blow dry', 'spa', 'keratin', 'cysteine', 'balayage', 'color'] },
-  { intent: 'makeup', terms: ['makeup', 'makeover', 'bridal', 'reception', 'wedding', 'party'] },
-  { intent: 'nails', terms: ['nail', 'manicure', 'pedicure', 'gel polish'] },
-  { intent: 'massage', terms: ['massage', 'spa', 'aromatherapy'] }
+  { intent: 'facial',   terms: ['facial', 'cleanup', 'clean-up', 'skin glow', 'glass skin', 'hydrafacial'] },
+  { intent: 'hair',     terms: ['hair', 'haircut', 'cut', 'blow dry', 'spa', 'keratin', 'cysteine', 'balayage', 'color'] },
+  { intent: 'makeup',   terms: ['makeup', 'makeover', 'bridal', 'reception', 'wedding', 'party'] },
+  { intent: 'nails',    terms: ['nail', 'manicure', 'pedicure', 'gel polish'] },
+  { intent: 'massage',  terms: ['massage', 'spa', 'aromatherapy'] },
 ]
 
 const AFFORDABLE_SERVICES = [
-  { salonName: 'Glow Essential Bandra', location: 'Bandra West', area: 'Bandra', rating: 4.4, reviewCount: 86, service: 'Underarm Waxing', price: 250, duration: '20 min', specialties: ['Waxing', 'Threading', 'Clean-up'], tags: ['Budget Friendly', 'Express Services'], coordinates: { lat: 19.0588, lng: 72.8324 } },
-  { salonName: 'Velvet Beauty Andheri', location: 'Andheri West', area: 'Andheri', rating: 4.8, reviewCount: 218, service: 'Eyebrow Design', price: 500, duration: '30 min', specialties: ['Threading', 'Skin Treatments', 'Nail Art'], tags: ['Celebrity Choice', 'Express Services'], coordinates: { lat: 19.1206, lng: 72.8275 } },
-  { salonName: 'Blossom Beauty Mulund', location: 'Mulund West', area: 'Powai', rating: 4.5, reviewCount: 120, service: 'Fruit Clean-up Facial', price: 800, duration: '45 min', specialties: ['Threading', 'Hair Styling', 'Facials'], tags: ['Affordable', 'Friendly'], coordinates: { lat: 19.1725, lng: 72.9563 } },
-  { salonName: 'Radiance Parlour Worli', location: 'Worli', area: 'Lower Parel', rating: 4.5, reviewCount: 95, service: 'Half Arms Waxing', price: 450, duration: '30 min', specialties: ['Facials', 'Waxing', 'Manicure'], tags: ['Clean', 'Budget Friendly'], coordinates: { lat: 19.0088, lng: 72.8172 } },
-  { salonName: 'Urban Fringe Santa Cruz', location: 'Santa Cruz West', area: 'Bandra', rating: 4.3, reviewCount: 71, service: 'Basic Threading Package', price: 350, duration: '25 min', specialties: ['Styling & Trimming', 'Organic Henna', 'Pedicure'], tags: ['Express Services', 'Budget Friendly'], coordinates: { lat: 19.0810, lng: 72.8410 } },
-  { salonName: 'Mahogany Studio Malad', location: 'Malad West', area: 'Andheri', rating: 4.4, reviewCount: 94, service: 'Full Arms Waxing', price: 499, duration: '35 min', specialties: ['Nail Extensions', 'Hair Spa', 'Waxing'], tags: ['Hygienic', 'Friendly'], coordinates: { lat: 19.1860, lng: 72.8485 } }
+  { salonName: 'Glow Essential Bandra',    location: 'Bandra West',   area: 'Bandra',      rating: 4.4, reviewCount: 86,  service: 'Underarm Waxing',       price: 250,  duration: '20 min', specialties: ['Waxing', 'Threading', 'Clean-up'],            tags: ['Budget Friendly', 'Express Services'], coordinates: { lat: 19.0588, lng: 72.8324 } },
+  { salonName: 'Velvet Beauty Andheri',    location: 'Andheri West',  area: 'Andheri',     rating: 4.8, reviewCount: 218, service: 'Eyebrow Design',        price: 500,  duration: '30 min', specialties: ['Threading', 'Skin Treatments', 'Nail Art'],   tags: ['Celebrity Choice', 'Express Services'], coordinates: { lat: 19.1206, lng: 72.8275 } },
+  { salonName: 'Blossom Beauty Mulund',    location: 'Mulund West',   area: 'Powai',       rating: 4.5, reviewCount: 120, service: 'Fruit Clean-up Facial', price: 800,  duration: '45 min', specialties: ['Threading', 'Hair Styling', 'Facials'],       tags: ['Affordable', 'Friendly'],              coordinates: { lat: 19.1725, lng: 72.9563 } },
+  { salonName: 'Radiance Parlour Worli',   location: 'Worli',         area: 'Lower Parel', rating: 4.5, reviewCount: 95,  service: 'Half Arms Waxing',      price: 450,  duration: '30 min', specialties: ['Facials', 'Waxing', 'Manicure'],              tags: ['Clean', 'Budget Friendly'],            coordinates: { lat: 19.0088, lng: 72.8172 } },
+  { salonName: 'Urban Fringe Santa Cruz',  location: 'Santa Cruz West', area: 'Bandra',    rating: 4.3, reviewCount: 71,  service: 'Basic Threading Package', price: 350, duration: '25 min', specialties: ['Styling & Trimming', 'Organic Henna', 'Pedicure'], tags: ['Express Services', 'Budget Friendly'], coordinates: { lat: 19.0810, lng: 72.8410 } },
+  { salonName: 'Mahogany Studio Malad',    location: 'Malad West',    area: 'Andheri',     rating: 4.4, reviewCount: 94,  service: 'Full Arms Waxing',      price: 499,  duration: '35 min', specialties: ['Nail Extensions', 'Hair Spa', 'Waxing'],      tags: ['Hygienic', 'Friendly'],                coordinates: { lat: 19.1860, lng: 72.8485 } },
 ]
 
 function parseBudget(text = '', profileBudget = '') {
   const source = `${text} ${profileBudget}`.toLowerCase()
   const underMatch = source.match(/(?:under|below|less than|within|upto|up to)\s*₹?\s*([\d,]+)/)
   if (underMatch) return Number(underMatch[1].replace(/,/g, ''))
-
-  const rupeeMatches = [...source.matchAll(/₹\s*([\d,]+)/g)].map(match => Number(match[1].replace(/,/g, '')))
+  const rupeeMatches = [...source.matchAll(/₹\s*([\d,]+)/g)].map(m => Number(m[1].replace(/,/g, '')))
   if (rupeeMatches.length) return Math.max(...rupeeMatches)
-
   const plainBudget = source.match(/budget\s*(?:is|of|:)?\s*([\d,]+)/)
   if (plainBudget) return Number(plainBudget[1].replace(/,/g, ''))
-
   return null
 }
 
 function detectIntent(text = '') {
   const lower = text.toLowerCase()
-  const match = SERVICE_ALIASES.find(group => group.terms.some(term => lower.includes(term)))
+  const match = SERVICE_ALIASES.find(g => g.terms.some(t => lower.includes(t)))
   if (match) return match.intent
   if (/wedding|bridal|reception|sangeet|engagement|occasion/.test(lower)) return 'occasion_plan'
   return 'beauty_concierge'
@@ -49,85 +97,73 @@ function detectIntent(text = '') {
 function serviceMatches(serviceText, intent, message) {
   const lower = serviceText.toLowerCase()
   const query = message.toLowerCase()
-  const alias = SERVICE_ALIASES.find(group => group.intent === intent)
-  if (alias?.terms.some(term => lower.includes(term) || query.includes(term) && lower.includes(intent))) return true
-  return query.split(/\s+/).some(word => word.length > 3 && lower.includes(word))
+  const alias = SERVICE_ALIASES.find(g => g.intent === intent)
+  if (alias?.terms.some(t => lower.includes(t) || (query.includes(t) && lower.includes(intent)))) return true
+  return query.split(/\s+/).some(w => w.length > 3 && lower.includes(w))
 }
 
 function withDistance(item, activeCoords) {
   if (!activeCoords || !item.coordinates) return item
-  const toRad = value => (value * Math.PI) / 180
-  const earthKm = 6371
+  const toRad = v => (v * Math.PI) / 180
+  const R = 6371
   const dLat = toRad(item.coordinates.lat - activeCoords.lat)
   const dLng = toRad(item.coordinates.lng - activeCoords.lng)
-  const lat1 = toRad(activeCoords.lat)
-  const lat2 = toRad(item.coordinates.lat)
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-  return { ...item, distance: earthKm * c }
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(activeCoords.lat)) * Math.cos(toRad(item.coordinates.lat)) * Math.sin(dLng / 2) ** 2
+  return { ...item, distance: R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) }
 }
 
 function buildLocalServiceMatches(message, profileState, activeCoords) {
   const budget = parseBudget(message, profileState?.budget)
   const intent = detectIntent(message)
   const queryLocation = (profileState?.location || '').toLowerCase()
-  const baseServices = localSalons.flatMap(salon => (salon.services || []).map(service => ({
-    salonName: salon.name,
-    location: salon.location,
-    area: salon.area,
-    rating: salon.rating,
-    reviewCount: salon.reviewCount,
-    service: service.name,
-    price: service.price,
-    duration: service.duration,
-    specialties: salon.specialties,
-    tags: salon.tags,
-    coordinates: salon.coordinates
-  })))
+
+  const baseServices = localSalons.flatMap(salon =>
+    (salon.services || []).map(service => ({
+      salonName: salon.name, location: salon.location, area: salon.area,
+      rating: salon.rating, reviewCount: salon.reviewCount,
+      service: service.name, price: service.price, duration: service.duration,
+      specialties: salon.specialties, tags: salon.tags, coordinates: salon.coordinates,
+    }))
+  )
 
   const allServices = [...baseServices, ...AFFORDABLE_SERVICES].map(item => withDistance(item, activeCoords))
-  const matches = allServices
-    .filter(item => {
-      const matchesIntent = intent === 'beauty_concierge' || intent === 'occasion_plan' || serviceMatches(`${item.service} ${(item.specialties || []).join(' ')} ${(item.tags || []).join(' ')}`, intent, message)
-      const matchesBudget = !budget || item.price <= budget
-      const matchesLocation = !queryLocation || queryLocation.includes('current gps') || item.area?.toLowerCase().includes(queryLocation) || item.location?.toLowerCase().includes(queryLocation) || queryLocation.includes(item.area?.toLowerCase())
-      return matchesIntent && matchesBudget && matchesLocation
-    })
-    .sort((a, b) => {
-      if (typeof a.distance === 'number' && typeof b.distance === 'number' && a.distance !== b.distance) return a.distance - b.distance
-      if (a.price !== b.price) return a.price - b.price
-      return b.rating - a.rating
-    })
-    .slice(0, 5)
 
-  if (matches.length >= 3) return matches
+  const filter = (locationRequired) => allServices.filter(item => {
+    const intentOk = intent === 'beauty_concierge' || intent === 'occasion_plan' ||
+      serviceMatches(`${item.service} ${(item.specialties || []).join(' ')} ${(item.tags || []).join(' ')}`, intent, message)
+    const budgetOk = !budget || item.price <= budget
+    const locationOk = !locationRequired || !queryLocation || queryLocation.includes('current gps') ||
+      item.area?.toLowerCase().includes(queryLocation) || item.location?.toLowerCase().includes(queryLocation) ||
+      queryLocation.includes(item.area?.toLowerCase())
+    return intentOk && budgetOk && locationOk
+  }).sort((a, b) => {
+    if (typeof a.distance === 'number' && typeof b.distance === 'number' && a.distance !== b.distance) return a.distance - b.distance
+    if (a.price !== b.price) return a.price - b.price
+    return b.rating - a.rating
+  })
 
-  const nearbyMatches = allServices
-    .filter(item => {
-      const matchesIntent = intent === 'beauty_concierge' || intent === 'occasion_plan' || serviceMatches(`${item.service} ${(item.specialties || []).join(' ')} ${(item.tags || []).join(' ')}`, intent, message)
-      const matchesBudget = !budget || item.price <= budget
-      return matchesIntent && matchesBudget
-    })
-    .sort((a, b) => {
-      if (typeof a.distance === 'number' && typeof b.distance === 'number' && a.distance !== b.distance) return a.distance - b.distance
-      if (a.price !== b.price) return a.price - b.price
-      return b.rating - a.rating
-    })
+  const located = filter(true).slice(0, 5)
+  if (located.length >= 3) return located
 
-  return [...matches, ...nearbyMatches.filter(item => !matches.some(match => match.salonName === item.salonName && match.service === item.service))]
+  const broader = filter(false)
+  return [...located, ...broader.filter(i => !located.some(l => l.salonName === i.salonName && l.service === i.service))]
     .slice(0, 5)
 }
 
 function formatServiceMatches(matches) {
   if (!matches.length) return 'No exact service-and-budget matches found in the GlowAI local dataset.'
-  return matches.map((item, idx) => `${idx + 1}. **${item.salonName}**
-   - Service: ${item.service}
-   - Rating: ⭐ ${item.rating} (${item.reviewCount} reviews)
-   - Price: ₹${item.price}
-   - Duration: ${item.duration}
-   - Location: ${item.location}
-   - Distance: ${typeof item.distance === 'number' ? `${item.distance.toFixed(1)} km away` : 'Ask user for area/GPS to calculate'}
-   - Specialties: ${(item.specialties || []).join(', ')}`).join('\n\n')
+  return matches.map((item, idx) =>
+    `${idx + 1}. **${item.salonName}**\n` +
+    `   - Service: ${item.service}\n` +
+    `   - Rating: ⭐ ${item.rating} (${item.reviewCount} reviews)\n` +
+    `   - Price: ₹${item.price}\n` +
+    `   - Duration: ${item.duration}\n` +
+    `   - Location: ${item.location}\n` +
+    `   - Distance: ${typeof item.distance === 'number' ? `${item.distance.toFixed(1)} km away` : 'Ask user for area/GPS to calculate'}\n` +
+    `   - Specialties: ${(item.specialties || []).join(', ')}`
+  ).join('\n\n')
 }
 
 function buildLocalConciergeReply({ message, profileState, serviceMatches, detectedIntent, detectedBudget, locationName }) {
@@ -135,130 +171,166 @@ function buildLocalConciergeReply({ message, profileState, serviceMatches, detec
 
   if (detectedIntent === 'occasion_plan') {
     const occasion = profileState?.occasion || message
-    return `✨ Absolutely. For ${occasion}, I would plan this in phases:
-
-1. **Now:** decide the style direction, outfit neckline, hair length, and grooming priorities.
-2. **3-4 weeks before:** book skin prep, hair consult, brows/beard shaping if needed, and a trial look.
-3. **1 week before:** do final facial or clean-up, hair spa/trim, nails, and outfit-compatible styling.
-4. **Event week:** keep treatments gentle, hydrate, and lock the final look.
-
-For your profile, I would lean toward **${profileState?.stylePreference || 'a polished, camera-ready style'}** with a budget estimate of **${profileState?.budget || '₹3,000-₹8,000'}** depending on salon tier.
-
-Would you like me to make this more bridal, minimal, celebrity-inspired, or clean professional?`
+    return (
+      `✨ Absolutely. For ${occasion}, I would plan this in phases:\n\n` +
+      `1. **Now:** decide the style direction, outfit neckline, hair length, and grooming priorities.\n` +
+      `2. **3–4 weeks before:** book skin prep, hair consult, brows/beard shaping if needed, and a trial look.\n` +
+      `3. **1 week before:** do final facial or clean-up, hair spa/trim, nails, and outfit-compatible styling.\n` +
+      `4. **Event week:** keep treatments gentle, hydrate, and lock the final look.\n\n` +
+      `For your profile, I would lean toward **${profileState?.stylePreference || 'a polished, camera-ready style'}** ` +
+      `with a budget estimate of **${profileState?.budget || '₹3,000–₹8,000'}** depending on salon tier.\n\n` +
+      `Would you like me to make this more bridal, minimal, celebrity-inspired, or clean professional?`
+    )
   }
 
   if (serviceMatches.length > 0) {
     const introBudget = detectedBudget ? ` within ₹${detectedBudget}` : ''
-    const lines = serviceMatches.slice(0, 3).map((item, idx) => `${idx + 1}. **${item.salonName}**
-   ⭐ ${item.rating}
-   ${item.service} - ₹${item.price}
-   ${typeof item.distance === 'number' ? `${item.distance.toFixed(1)} km away` : item.location}`)
-
-    return `✨ I found ${Math.min(serviceMatches.length, 3)} ${detectedIntent.replace('_', ' ')} option${serviceMatches.length === 1 ? '' : 's'} near ${area}${introBudget}:
-
-${lines.join('\n\n')}
-
-My pick: start with the closest option if you want speed, or choose the highest-rated salon if finish and hygiene matter more.
-
-Would you prefer:
-• Home service
-• Salon visit
-• A full package with add-ons`
+    const lines = serviceMatches.slice(0, 3).map((item, idx) =>
+      `${idx + 1}. **${item.salonName}**\n` +
+      `   ⭐ ${item.rating}\n` +
+      `   ${item.service} — ₹${item.price}\n` +
+      `   ${typeof item.distance === 'number' ? `${item.distance.toFixed(1)} km away` : item.location}`
+    )
+    return (
+      `✨ I found ${Math.min(serviceMatches.length, 3)} ${detectedIntent.replace('_', ' ')} option${serviceMatches.length === 1 ? '' : 's'} near ${area}${introBudget}:\n\n` +
+      lines.join('\n\n') +
+      `\n\nMy pick: start with the closest option if you want speed, or choose the highest-rated salon if finish and hygiene matter more.\n\n` +
+      `Would you prefer:\n• Home service\n• Salon visit\n• A full package with add-ons`
+    )
   }
 
-  return `✨ I can help with that. I could not find an exact salon-service match in the current GlowAI dataset for ${area}, so I need one detail before I recommend:
-
-What matters most right now: lowest price, closest salon, highest rating, or a specific look?`
+  return (
+    `✨ I can help with that. I could not find an exact salon-service match in the current GlowAI dataset for ${area}, ` +
+    `so I need one detail before I recommend:\n\n` +
+    `What matters most right now: lowest price, closest salon, highest rating, or a specific look?`
+  )
 }
 
-/**
- * Controller handling real-time OpenAI streaming chat for the Glow concierge.
- */
+// Stream a string sentence-by-sentence with a short delay between chunks.
+// Gives the local fallback the same progressive UX as the OpenAI path.
+async function streamLocalReply(res, text, userId) {
+  // Split on sentence boundaries while preserving list items and line breaks
+  const sentences = text.match(/[^.!?\n]+[.!?\n]?|\n+/g) || [text]
+  let fullText = ''
+
+  for (const sentence of sentences) {
+    const trimmed = sentence
+    if (!trimmed) continue
+    fullText += trimmed
+    res.write(`data: ${JSON.stringify({ text: trimmed })}\n\n`)
+    // Small artificial delay so the client renders progressively
+    await new Promise(resolve => setTimeout(resolve, 40))
+  }
+
+  if (userId) {
+    await db.chatHistories.saveMessage(userId, { isUser: false, text: fullText.trim() })
+  }
+}
+
+// Map OpenAI error codes / HTTP statuses to user-facing SSE error messages.
+function openAIErrorMessage(err) {
+  const status = err?.status || err?.statusCode
+  const code   = err?.code || err?.error?.code
+
+  if (status === 401 || code === 'invalid_api_key') {
+    return 'Glow is not available right now — the AI service is not configured correctly. Please contact support.'
+  }
+  if (status === 429 || code === 'rate_limit_exceeded' || code === 'insufficient_quota') {
+    return 'Glow is receiving too many requests right now. Please try again in a few seconds.'
+  }
+  if (status === 503 || status === 500) {
+    return 'The AI service is temporarily unavailable. Please try again shortly.'
+  }
+  if (code === 'context_length_exceeded') {
+    return 'This conversation has become too long. Please clear the chat and start fresh.'
+  }
+  return 'Glow is having trouble connecting right now. Please try again in a moment.'
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// handleChat — main SSE controller
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const handleChat = async (req, res, next) => {
+  const { userId, message, profileState, coords } = req.body
+
+  if (!message || typeof message !== 'string' || !message.trim()) {
+    return res.status(400).json({ error: 'Message is required.' })
+  }
+
   try {
-    const { userId, message, profileState, coords } = req.body
-
-    if (!message) {
-      return res.status(400).json({ error: 'Message is required.' })
-    }
-
-    // 1. Fetch chat history from in-memory DB
+    // ── 1. Fetch chat history from in-memory DB ────────────────────────────
     const dbHistory = userId ? await db.chatHistories.getHistory(userId) : []
-    const apiMessages = dbHistory.map(m => ({
-      role: m.isUser ? 'user' : 'assistant',
-      content: m.text
-    }))
 
-    // Save current user message
+    // Build OpenAI message array from history, capped to MAX_HISTORY_MESSAGES.
+    // Trimming from the front keeps the most recent context.
+    const rawMessages = dbHistory.map(m => ({ role: m.isUser ? 'user' : 'assistant', content: m.text }))
+    const trimmedHistory = rawMessages.slice(-MAX_HISTORY_MESSAGES)
+
+    // Save the incoming user message to history
     if (userId) {
-      await db.chatHistories.saveMessage(userId, { isUser: true, text: message })
+      await db.chatHistories.saveMessage(userId, { isUser: true, text: message.trim() })
     }
 
-    // Append new message
-    apiMessages.push({ role: 'user', content: message })
+    // The full messages array sent to OpenAI (system prompt prepended later)
+    const apiMessages = [...trimmedHistory, { role: 'user', content: message.trim() }]
 
-    // 2. Resolve location & fetch nearby salons
+    // ── 2. Resolve location & fetch nearby salons ──────────────────────────
     let activeCoords = coords
     const locationName = profileState?.location || ''
+
     if (!activeCoords && locationName) {
       const geo = geocodeAddress(locationName)
-      if (geo && geo.lat) {
-        activeCoords = { lat: geo.lat, lng: geo.lng }
-      }
+      if (geo?.lat) activeCoords = { lat: geo.lat, lng: geo.lng }
     }
 
     let salonText = 'No nearby salons found or location not provided yet.'
-    if (activeCoords && activeCoords.lat) {
+    if (activeCoords?.lat) {
       try {
-        const radius = 5000
-        const salonsData = await fetchGooglePlacesSalons(activeCoords.lat, activeCoords.lng, radius)
-        
+        const salonsData = await fetchGooglePlacesSalons(activeCoords.lat, activeCoords.lng, 5000)
         const analysisData = {
-          faceShape: { technicalClassification: profileState?.faceShape },
+          faceShape:    { technicalClassification: profileState?.faceShape },
           hairAnalysis: { technicalClassification: profileState?.hairAnalysis },
-          skinAnalysis: { technicalClassification: profileState?.skinAnalysis }
+          skinAnalysis: { technicalClassification: profileState?.skinAnalysis },
         }
-        const profileData = { 
-          budgetRange: profileState?.budget || '₹1,500–₹3,000', 
-          occasion: profileState?.occasion || '', 
-          styleIntent: profileState?.userIntent || message 
+        const profileData = {
+          budgetRange: profileState?.budget   || '₹1,500–₹3,000',
+          occasion:    profileState?.occasion || '',
+          styleIntent: profileState?.userIntent || message,
         }
-        
-        const rankedSalons = rankSalons(salonsData, analysisData, profileData)
-        const topSalons = rankedSalons.slice(0, 4)
-        
+        const topSalons = rankSalons(salonsData, analysisData, profileData).slice(0, 4)
         if (topSalons.length > 0) {
-          salonText = topSalons.map((s, idx) => {
-            return `${idx + 1}. **${s.name}**
-   - Location: ${s.location}
-   - Rating: ⭐ ${s.rating} (${s.reviewCount} reviews)
-   - Distance: ${s.distance ? s.distance.toFixed(1) + ' km away' : 'N/A'}
-   - Match Score: ${s.matchScore}% Match
-   - Estimated Cost: Starting at ₹${s.priceFrom || 1500}
-   - Specialties: ${s.specialties ? s.specialties.join(', ') : 'Styling'}
-   - Match Reason: ${s.whyRecommended || ''}`
-          }).join('\n\n')
+          salonText = topSalons.map((s, idx) =>
+            `${idx + 1}. **${s.name}**\n` +
+            `   - Location: ${s.location}\n` +
+            `   - Rating: ⭐ ${s.rating} (${s.reviewCount} reviews)\n` +
+            `   - Distance: ${s.distance ? s.distance.toFixed(1) + ' km away' : 'N/A'}\n` +
+            `   - Match Score: ${s.matchScore}% Match\n` +
+            `   - Estimated Cost: Starting at ₹${s.priceFrom || 1500}\n` +
+            `   - Specialties: ${s.specialties ? s.specialties.join(', ') : 'Styling'}\n` +
+            `   - Match Reason: ${s.whyRecommended || ''}`
+          ).join('\n\n')
         }
       } catch (err) {
-        console.error('Error fetching/ranking salons for concierge:', err)
+        console.error('[handleChat] Salon fetch/rank error:', err.message)
       }
     }
 
-    const detectedIntent = detectIntent(message)
-    const detectedBudget = parseBudget(message, profileState?.budget)
-    const serviceMatches = buildLocalServiceMatches(message, profileState, activeCoords)
-    const serviceMatchText = formatServiceMatches(serviceMatches)
+    const detectedIntent   = detectIntent(message)
+    const detectedBudget   = parseBudget(message, profileState?.budget)
+    const localMatches     = buildLocalServiceMatches(message, profileState, activeCoords)
+    const serviceMatchText = formatServiceMatches(localMatches)
 
-    // 3. Construct system prompt
+    // ── 3. Build system prompt ─────────────────────────────────────────────
     const userProfileContext = {
-      faceShape: profileState?.faceShape || '',
-      skinAnalysis: profileState?.skinAnalysis || '',
-      hairAnalysis: profileState?.hairAnalysis || '',
-      budget: profileState?.budget || '',
-      location: locationName || '',
-      userIntent: profileState?.userIntent || detectedIntent || '',
-      stylePreference: profileState?.stylePreference || '',
-      occasion: profileState?.occasion || null
+      faceShape:       profileState?.faceShape        || '',
+      skinAnalysis:    profileState?.skinAnalysis      || '',
+      hairAnalysis:    profileState?.hairAnalysis      || '',
+      budget:          profileState?.budget            || '',
+      location:        locationName                    || '',
+      userIntent:      profileState?.userIntent || detectedIntent || '',
+      stylePreference: profileState?.stylePreference   || '',
+      occasion:        profileState?.occasion          || null,
     }
 
     const systemPrompt = `You are Glow, the AI beauty concierge for GlowAI.
@@ -278,25 +350,16 @@ Never act like a generic ChatGPT assistant.
 Always guide users toward personalized beauty recommendations.
 Never echo the user's message back as the main answer.
 
-Always consider:
-- Face shape
-- Skin analysis
-- Hair analysis
-- Location
-- Budget
-- Occasion
-- User goals
-
-when available.
+Always consider face shape, skin analysis, hair analysis, location, budget, occasion, and user goals when available.
 
 Current user profile context:
 ${JSON.stringify(userProfileContext, null, 2)}
 
 Detected request:
-${JSON.stringify({ intent: detectedIntent, budgetCap: detectedBudget, hasCoordinates: Boolean(activeCoords), serviceMatchCount: serviceMatches.length }, null, 2)}
+${JSON.stringify({ intent: detectedIntent, budgetCap: detectedBudget, hasCoordinates: Boolean(activeCoords), serviceMatchCount: localMatches.length }, null, 2)}
 
 Behavior rules:
-1. Use the profile context directly when it is available. Example: "Since your detected face shape is Oval and your hair texture is Wavy 2A..."
+1. Use profile context directly when available. Example: "Since your detected face shape is Oval and your hair texture is Wavy 2A..."
 2. If the user describes an occasion or timeline, create a practical beauty preparation plan with phases, timing, suggested treatments, style inspirations, salon recommendations, and estimated budget.
 3. If the user gives a budget, suggest what that budget can cover and ask for the next missing detail.
 4. For service-and-budget requests, prioritize the GlowAI service matches below. Return salon name, rating, price, distance when available, and a short reason.
@@ -311,49 +374,64 @@ ${serviceMatchText}
 Available nearby salons ranked by the GlowAI matching engine:
 ${salonText}`
 
-    // 4. Send Streamed SSE Response
-    res.setHeader('Content-Type', 'text/event-stream')
-    res.setHeader('Cache-Control', 'no-cache')
-    res.setHeader('Connection', 'keep-alive')
-    res.flushHeaders()
-
-    if (!config.openaiApiKey || config.openaiApiKey === 'YOUR_KEY_HERE') {
+    // ── 4. KEY CHECK — before any SSE headers are written ─────────────────
+    // FIXED: the original code opened the SSE stream first, then checked the
+    // key. This made it impossible to send a proper HTTP error response when
+    // the key was missing in production (headers already sent).
+    if (!config.openaiEnabled) {
       if (isProduction) {
-        console.error('OpenAI API key missing in production. Concierge disabled.')
+        // In production with no key: return a plain JSON 503.
+        // The SSE stream has NOT been opened yet so this is safe.
+        console.error('[handleChat] OPENAI_API_KEY missing in production. Chat disabled.')
         return res.status(503).json({
-          error: 'AI concierge is unavailable in production until OPENAI_API_KEY is configured.'
+          error: 'AI concierge is temporarily unavailable.',
+          message: 'The AI service is not configured. Please contact support or try again later.',
         })
       }
+
+      // ── Development fallback (no key) ────────────────────────────────────
+      // Open SSE stream and deliver the local concierge reply sentence-by-sentence.
+      if (res.headersSent) return
+      res.setHeader('Content-Type', 'text/event-stream')
+      res.setHeader('Cache-Control', 'no-cache')
+      res.setHeader('Connection', 'keep-alive')
+      res.setHeader('X-Accel-Buffering', 'no')
+      res.flushHeaders()
 
       const localReply = buildLocalConciergeReply({
         message,
         profileState,
-        serviceMatches,
+        serviceMatches: localMatches,
         detectedIntent,
         detectedBudget,
-        locationName
+        locationName,
       })
 
-      res.write(`data: ${JSON.stringify({ text: localReply })}\n\n`)
-      if (userId) {
-        await db.chatHistories.saveMessage(userId, { isUser: false, text: localReply })
-      }
+      await streamLocalReply(res, localReply, userId)
       res.write('data: [DONE]\n\n')
       res.end()
       return
     }
 
-    const openai = new OpenAI({ apiKey: config.openaiApiKey })
+    // ── 5. OpenAI streaming path ───────────────────────────────────────────
+    if (res.headersSent) return
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    res.setHeader('X-Accel-Buffering', 'no')   // disable Nginx/proxy buffering
+    res.flushHeaders()
+
     const messages = [
       { role: 'system', content: systemPrompt },
-      ...apiMessages
+      ...apiMessages,
     ]
 
-    const stream = await openai.chat.completions.create({
-      model: config.openaiModel,
+    const stream = await openaiClient.chat.completions.create({
+      model:       config.openaiModel,   // default: gpt-4o-mini
       messages,
-      stream: true,
-      temperature: 0.8
+      stream:      true,
+      temperature: 0.8,
+      max_tokens:  1024,
     })
 
     let fullText = ''
@@ -365,27 +443,42 @@ ${salonText}`
       }
     }
 
-    // Save assistant message to history
-    if (userId) {
+    if (userId && fullText.trim()) {
       await db.chatHistories.saveMessage(userId, { isUser: false, text: fullText.trim() })
     }
 
     res.write('data: [DONE]\n\n')
     res.end()
+
   } catch (err) {
-    console.error('SSE streaming error:', err)
+    console.error('[handleChat] Error:', err?.message || err)
+
+    const userMessage = openAIErrorMessage(err)
+
     if (!res.headersSent) {
-      return res.status(500).json({ error: 'Glow chat request failed.' })
+      // Stream not yet open: send plain JSON error
+      return res.status(err?.status || 500).json({ error: userMessage })
     }
-    res.write(`data: ${JSON.stringify({ error: 'Glow is having trouble connecting right now. Please try again soon.' })}\n\n`)
-    res.write('data: [DONE]\n\n')
-    res.end()
+
+    // Stream already open: send error via SSE so the frontend can display it
+    try {
+      res.write(`data: ${JSON.stringify({ error: userMessage })}\n\n`)
+      res.write('data: [DONE]\n\n')
+      res.end()
+    } catch (_) {
+      // Connection already closed by client — nothing to do
+    }
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// getChatHistory / clearChatHistory
+// ─────────────────────────────────────────────────────────────────────────────
 
 export const getChatHistory = async (req, res, next) => {
   try {
     const { userId } = req.params
+    if (!userId) return res.status(400).json({ error: 'userId is required.' })
     const history = await db.chatHistories.getHistory(userId)
     return res.status(200).json(history)
   } catch (err) {
@@ -396,6 +489,7 @@ export const getChatHistory = async (req, res, next) => {
 export const clearChatHistory = async (req, res, next) => {
   try {
     const { userId } = req.params
+    if (!userId) return res.status(400).json({ error: 'userId is required.' })
     await db.chatHistories.clearHistory(userId)
     return res.status(200).json({ success: true, message: 'Chat history cleared.' })
   } catch (err) {

@@ -1,5 +1,12 @@
 import { createContext, useContext, useState, useEffect } from 'react'
-import { getCurrentUser, loginUser, logoutUser, createUser } from '../services/storageService'
+import {
+  getCurrentUser,
+  loginUser,
+  logoutUser,
+  createUser,
+  generateResetToken,
+  resetPassword as resetPasswordInStore
+} from '../services/storageService'
 
 const AuthContext = createContext()
 
@@ -24,7 +31,6 @@ export function AuthProvider({ children }) {
 
   const register = async (name, email, password) => {
     const newUser = await createUser(name, email, password)
-    // Auto login after register
     await loginUser(email, password, true)
     setUser(newUser)
     return newUser
@@ -35,8 +41,27 @@ export function AuthProvider({ children }) {
     setUser(null)
   }
 
+  const forgotPassword = async (email) => {
+    return generateResetToken(email)
+  }
+
+  const resetPassword = async (token, newPassword) => {
+    return resetPasswordInStore(token, newPassword)
+  }
+
   return (
-    <AuthContext.Provider value={{ user, loading, isAuthenticated: !!user, login, register, logout }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        loading,
+        isAuthenticated: !!user,
+        login,
+        register,
+        logout,
+        forgotPassword,
+        resetPassword
+      }}
+    >
       {children}
     </AuthContext.Provider>
   )
