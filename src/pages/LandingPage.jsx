@@ -61,7 +61,6 @@ const VALIDATION_CHECKS = [
   { key: 'oneFace',      passLabel: 'Single Face',          failLabel: 'Multiple faces detected. Only you should be in frame.' },
   { key: 'faceSize',     passLabel: 'Face Close Enough',    failLabel: 'Move closer to the camera' },
   { key: 'faceCentered', passLabel: 'Face Centred',         failLabel: 'Look directly at the camera' },
-  { key: 'hairVisible',  passLabel: 'Hair Open & Visible',  failLabel: 'Wear hair down — tied/covered hair not accepted' },
   { key: 'lightingGood', passLabel: 'Good Lighting',        failLabel: 'Move to a brighter area' },
   { key: 'notBlurry',    passLabel: 'Image Sharp',          failLabel: 'Hold steady — image is blurry' },
 ]
@@ -742,7 +741,6 @@ function InteractiveAIBeautyAnalyzer() {
           <div className="w-full space-y-2">
             {[
               'Mapping face shape & symmetry',
-              'Analysing hair type & texture',
               'Reading skin undertone',
               'Surfacing celebrity style matches',
             ].map((label, i) => {
@@ -881,7 +879,7 @@ function InteractiveAIBeautyAnalyzer() {
             </div>
 
             {/* Skin Tone */}
-            <div className="flex items-start justify-between border-b border-white/5 pb-2">
+            <div className="flex items-start justify-between pb-1">
               <span className="font-inter text-[11px] text-white/70 pt-0.5">Skin Tone</span>
               <div className="text-right">
                 <span className={`font-inter text-[11px] font-semibold ${
@@ -895,21 +893,6 @@ function InteractiveAIBeautyAnalyzer() {
                   {analysisResult?.skinTone
                     ? `${analysisResult.skinConfidence}% confidence · ${analysisResult.skinUndertone} undertone`
                     : 'Needs clearer lighting'}
-                </p>
-              </div>
-            </div>
-
-            {/* Hair */}
-            <div className="flex items-start justify-between pb-1">
-              <span className="font-inter text-[11px] text-white/70 pt-0.5">Hair Analysis</span>
-              <div className="text-right">
-                <span className="font-inter text-[11px] font-semibold text-white/65">
-                  {analysisResult?.hairVisible ? 'Pending full scan' : 'Hair not visible'}
-                </span>
-                <p className="font-inter text-[9px] text-white/60 leading-tight mt-0.5">
-                  {analysisResult?.hairVisible
-                    ? 'Complete profile for hair analysis'
-                    : 'Open hair for accurate analysis'}
                 </p>
               </div>
             </div>

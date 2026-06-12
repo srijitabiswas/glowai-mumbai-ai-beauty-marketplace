@@ -1,6 +1,5 @@
 import { detectLandmarks, classifyFaceShape } from './faceAnalysisService'
 import { analyzeSkin } from './skinAnalysisService'
-import { analyzeHair } from './hairAnalysisService'
 import { generateRecommendations } from './recommendationEngine'
 import { validateLandmarkReadiness } from './imageValidation'
 

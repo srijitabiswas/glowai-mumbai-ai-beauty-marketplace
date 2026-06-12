@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Search, MapPin, Star, X, LayoutGrid, Map as MapIcon, SlidersHorizontal, Sparkles, Navigation, AlertCircle } from 'lucide-react'
+import { Search, MapPin, Star, X, LayoutGrid, Map as MapIcon, Sparkles, Navigation, AlertCircle } from 'lucide-react'
 import MainLayout from '../layouts/MainLayout'
 import SalonCard  from '../components/SalonCard'
 import SectionHeader from '../components/SectionHeader'
@@ -13,7 +13,6 @@ import { MUMBAI_AREA_GROUPS, MUMBAI_AREAS } from '../data/mumbaiAreas'
 const RATINGS = ['All', '4.8+', '4.6+', '4.4+']
 const BUDGETS = ['All', 'Under ₹1,500', '₹1,500–₹3,000', 'Above ₹3,000']
 
-// Default fallbacks for matching engine if user hasn't run the analysis
 const DEFAULT_ANALYSIS = {
   faceShape: { technicalClassification: 'Oval', confidence: 90, plainEnglishMeaning: 'Balanced proportions', whyItWasDetected: 'Default profile' },
   skinAnalysis: { technicalClassification: 'Medium Warm', confidence: 92, plainEnglishMeaning: 'Golden undertones', whyItWasDetected: 'Default profile' },
@@ -34,30 +33,26 @@ const DEFAULT_PROFILE = {
 
 export default function SalonMarketplace() {
   const { profile, analysis, isAnalyzed } = useBeautyProfile()
-  
-  // Location States
-  const [permissionState, setPermissionState] = useState('prompt') // 'prompt' | 'requesting' | 'granted' | 'denied' | 'error'
-  const [coords, setCoords] = useState(null)
+
+  const [permissionState, setPermissionState] = useState('prompt')
+  const [coords, setCoords]           = useState(null)
   const [locationLabel, setLocationLabel] = useState('')
   const [manualQuery, setManualQuery] = useState('')
   const [selectedArea, setSelectedArea] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
 
-  // UI States
-  const [query, setQuery] = useState('')
+  const [query,  setQuery]  = useState('')
   const [rating, setRating] = useState('All')
   const [budget, setBudget] = useState('All')
-  const [viewMode, setViewMode] = useState('list') // 'list' | 'map'
-  const [loading, setLoading] = useState(false)
-  const [rawSalons, setRawSalons] = useState([])
+  const [viewMode, setViewMode] = useState('list')
+  const [loading, setLoading]   = useState(false)
+  const [rawSalons, setRawSalons]     = useState([])
   const [rankedSalons, setRankedSalons] = useState([])
   const [selectedMapSalon, setSelectedMapSalon] = useState(null)
 
-  // Use active analysis or default
   const activeAnalysis = isAnalyzed ? analysis : DEFAULT_ANALYSIS
-  const activeProfile = isAnalyzed ? profile : DEFAULT_PROFILE
+  const activeProfile  = isAnalyzed ? profile  : DEFAULT_PROFILE
 
-  // Request Geolocation Coords
   const requestLocation = async () => {
     setPermissionState('requesting')
     setLoading(true)
@@ -67,14 +62,14 @@ export default function SalonMarketplace() {
       setCoords(position)
       setPermissionState('granted')
       setLocationLabel('Current Location')
-      
+
       const stylingContext = {
-        faceShape: activeAnalysis?.faceShape?.technicalClassification,
-        hairType: activeAnalysis?.hairAnalysis?.technicalClassification,
-        skinTone: activeAnalysis?.skinAnalysis?.technicalClassification,
+        faceShape:   activeAnalysis?.faceShape?.technicalClassification,
+        hairType:    activeAnalysis?.hairAnalysis?.technicalClassification,
+        skinTone:    activeAnalysis?.skinAnalysis?.technicalClassification,
         budgetRange: activeProfile?.budgetRange,
-        occasion: activeProfile?.occasion,
-        styleIntent: activeProfile?.styleIntent
+        occasion:    activeProfile?.occasion,
+        styleIntent: activeProfile?.styleIntent,
       }
 
       const salonsData = await getSalonsForLocation(position, 5000, stylingContext)
@@ -83,24 +78,25 @@ export default function SalonMarketplace() {
       console.warn('Geolocation failed:', err)
       setPermissionState('denied')
       setErrorMessage(
-        err.code === 1 
-          ? 'Location permission was denied. Please search manually below.' 
-          : 'Unable to retrieve location. Please search manually below.'
+        err.code === 1
+          ? 'location_denied'
+          : 'location_error'
       )
-      // Load fallback location (Mumbai Center)
+
+      // Load fallback (Mumbai Centre) silently
       const fallbackCoords = { lat: 19.0760, lng: 72.8777 }
       setCoords(fallbackCoords)
       setLocationLabel('Mumbai (Default)')
-      
+
       const stylingContext = {
-        faceShape: activeAnalysis?.faceShape?.technicalClassification,
-        hairType: activeAnalysis?.hairAnalysis?.technicalClassification,
-        skinTone: activeAnalysis?.skinAnalysis?.technicalClassification,
+        faceShape:   activeAnalysis?.faceShape?.technicalClassification,
+        hairType:    activeAnalysis?.hairAnalysis?.technicalClassification,
+        skinTone:    activeAnalysis?.skinAnalysis?.technicalClassification,
         budgetRange: activeProfile?.budgetRange,
-        occasion: activeProfile?.occasion,
-        styleIntent: activeProfile?.styleIntent
+        occasion:    activeProfile?.occasion,
+        styleIntent: activeProfile?.styleIntent,
       }
-      
+
       try {
         const salonsData = await getSalonsForLocation(fallbackCoords, 5000, stylingContext)
         setRawSalons(salonsData)
@@ -112,22 +108,20 @@ export default function SalonMarketplace() {
     }
   }
 
-  // Handle Manual Search
   const handleManualSearch = async (e) => {
     if (e) e.preventDefault()
-    
-    let searchText = manualQuery.trim()
+
+    const searchText = manualQuery.trim()
     const stylingContext = {
-      faceShape: activeAnalysis?.faceShape?.technicalClassification,
-      hairType: activeAnalysis?.hairAnalysis?.technicalClassification,
-      skinTone: activeAnalysis?.skinAnalysis?.technicalClassification,
+      faceShape:   activeAnalysis?.faceShape?.technicalClassification,
+      hairType:    activeAnalysis?.hairAnalysis?.technicalClassification,
+      skinTone:    activeAnalysis?.skinAnalysis?.technicalClassification,
       budgetRange: activeProfile?.budgetRange,
-      occasion: activeProfile?.occasion,
-      styleIntent: activeProfile?.styleIntent
+      occasion:    activeProfile?.occasion,
+      styleIntent: activeProfile?.styleIntent,
     }
 
     if (!searchText) {
-      // Use Mumbai center when no area has been selected yet.
       const cityData = geocodeAddress('mumbai')
       setLoading(true)
       setCoords({ lat: cityData.lat, lng: cityData.lng })
@@ -143,11 +137,13 @@ export default function SalonMarketplace() {
     const geocoded = geocodeAddress(searchText)
     setCoords({ lat: geocoded.lat, lng: geocoded.lng })
     setLocationLabel(geocoded.label)
-    
+
     try {
       const salonsData = await getSalonsForLocation({ lat: geocoded.lat, lng: geocoded.lng }, 5000, stylingContext)
       setRawSalons(salonsData)
       setPermissionState('granted')
+      // Clear location error when user searches manually
+      setErrorMessage('')
     } catch (err) {
       console.error('Manual search fetch failed:', err)
     } finally {
@@ -155,39 +151,35 @@ export default function SalonMarketplace() {
     }
   }
 
-  // Rank salons using match engine whenever rawSalons, analysis, or profile updates
   useEffect(() => {
     if (rawSalons.length > 0) {
       const ranked = rankSalons(rawSalons, activeAnalysis, activeProfile)
       setRankedSalons(ranked)
-      if (ranked.length > 0) {
-        setSelectedMapSalon(ranked[0])
-      }
+      if (ranked.length > 0) setSelectedMapSalon(ranked[0])
     } else {
       setRankedSalons([])
     }
   }, [rawSalons, activeAnalysis, activeProfile])
 
-  // Filter ranked salons based on search fields
   const filteredSalons = rankedSalons.filter(s => {
-    const qMatch = s.name.toLowerCase().includes(query.toLowerCase()) || 
+    const qMatch = s.name.toLowerCase().includes(query.toLowerCase()) ||
                    s.location.toLowerCase().includes(query.toLowerCase()) ||
                    s.specialties.some(sp => sp.toLowerCase().includes(query.toLowerCase()))
-                   
     const rMatch = rating === 'All' || s.rating >= parseFloat(rating)
     const bMatch = budget === 'All' ||
       (budget === 'Under ₹1,500' && s.priceFrom < 1500) ||
       (budget === '₹1,500–₹3,000' && s.priceFrom >= 1500 && s.priceFrom <= 3000) ||
       (budget === 'Above ₹3,000' && s.priceFrom > 3000)
-
     return qMatch && rMatch && bMatch
   })
+
+  const showLocationError = (errorMessage === 'location_denied' || errorMessage === 'location_error') && rankedSalons.length === 0
 
   return (
     <MainLayout>
       <div className="pt-24 pb-20 px-4 sm:px-6 lg:px-8 min-h-screen">
         <div className="max-w-7xl mx-auto">
-          
+
           <SectionHeader
             badge="AI style concierge"
             title="Smart Salon Matching"
@@ -203,7 +195,7 @@ export default function SalonMarketplace() {
                   <p className="font-inter text-xs text-glow-muted">Complete your selfie analysis to unlock 100% personalized salon matching scores.</p>
                 </div>
               </div>
-              <button 
+              <button
                 onClick={() => window.location.href = '/profile-setup'}
                 className="btn-gold py-1.5 px-4 text-xs"
               >
@@ -212,29 +204,28 @@ export default function SalonMarketplace() {
             </motion.div>
           )}
 
-          {/* ── Geolocation Explanation Prompt ── */}
+          {/* ── Geolocation Prompt ── */}
           {permissionState === 'prompt' && (
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               className="card-luxury p-8 max-w-2xl mx-auto mb-12 border border-glow-gold/30 bg-gradient-to-br from-glow-surface to-glow-gold/5 text-center relative overflow-hidden shadow-luxury"
             >
-              <div className="absolute top-0 right-0 w-24 h-24 bg-glow-gold/10 rounded-full blur-2xl"></div>
+              <div className="absolute top-0 right-0 w-24 h-24 bg-glow-gold/10 rounded-full blur-2xl" />
               <MapPin className="text-glow-gold mx-auto mb-4 animate-bounce" size={40} />
               <h2 className="font-playfair text-2xl font-medium text-glow-black mb-3">Find Nearby Salons</h2>
               <p className="font-inter text-sm text-glow-muted leading-relaxed max-w-md mx-auto mb-6">
                 GlowAI uses your location to discover the best salons in your area capable of styling your recommended look.
               </p>
-              
               <div className="flex flex-col sm:flex-row justify-center gap-4 max-w-sm mx-auto">
-                <button 
-                  onClick={requestLocation} 
+                <button
+                  onClick={requestLocation}
                   className="btn-gold py-3 px-6 text-sm flex items-center justify-center gap-2"
                 >
                   <Navigation size={15} /> Use My Location
                 </button>
-                <button 
-                  onClick={() => setPermissionState('denied')} 
+                <button
+                  onClick={() => setPermissionState('denied')}
                   className="btn-outline-gold py-3 px-6 text-sm"
                 >
                   Search Manually
@@ -246,17 +237,17 @@ export default function SalonMarketplace() {
           {/* ── Requesting Location Spinner ── */}
           {permissionState === 'requesting' && (
             <div className="text-center py-20">
-              <div className="w-12 h-12 rounded-full border-2 border-glow-gold border-t-transparent animate-spin mx-auto mb-4"></div>
+              <div className="w-12 h-12 rounded-full border-2 border-glow-gold border-t-transparent animate-spin mx-auto mb-4" />
               <p className="font-playfair text-lg text-glow-black font-semibold">Requesting Location Permission…</p>
               <p className="font-inter text-xs text-glow-muted mt-1">Please approve the browser location popup.</p>
             </div>
           )}
 
-          {/* ── Main Dashboard (When Location is resolved or manual search configured) ── */}
+          {/* ── Main Dashboard ── */}
           {(permissionState === 'granted' || permissionState === 'denied' || permissionState === 'error') && (
             <div>
-              {/* Location Feedback Bar / Manual Search Fallback */}
-              <div className="card-luxury p-5 mb-8 border border-glow-border flex flex-col md:flex-row md:items-center md:justify-between gap-5">
+              {/* Location Bar + Manual Search */}
+              <div className="card-luxury p-5 mb-6 border border-glow-border flex flex-col md:flex-row md:items-center md:justify-between gap-5">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-xl bg-glow-gold/10 flex items-center justify-center text-glow-gold shrink-0">
                     <MapPin size={18} />
@@ -271,7 +262,7 @@ export default function SalonMarketplace() {
                   <div className="py-2.5 px-3 border border-glow-border rounded-xl font-inter text-xs font-semibold text-glow-black bg-glow-surface">
                     Mumbai
                   </div>
-                  <select 
+                  <select
                     value={selectedArea}
                     onChange={(e) => {
                       const value = e.target.value
@@ -308,14 +299,28 @@ export default function SalonMarketplace() {
                 </form>
               </div>
 
-              {errorMessage && (
-                <div className="mb-6 p-4 bg-red-50 border border-red-200 text-red-800 rounded-xl flex items-center gap-2.5 text-xs font-inter">
-                  <AlertCircle size={15} className="shrink-0" />
-                  {errorMessage}
-                </div>
+              {/* ── Location Error Banner ── */}
+              {showLocationError && (
+                <motion.div
+                  initial={{ opacity: 0, y: -8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mb-6 p-5 bg-glow-surface border border-glow-border rounded-2xl flex items-start gap-4 shadow-card"
+                >
+                  <div className="w-10 h-10 rounded-xl bg-glow-gold/10 flex items-center justify-center shrink-0">
+                    <MapPin size={18} className="text-glow-gold" />
+                  </div>
+                  <div>
+                    <p className="font-playfair text-base font-semibold text-glow-black mb-1">
+                      We're sorry, currently unable to access your location
+                    </p>
+                    <p className="font-inter text-xs text-glow-muted leading-relaxed">
+                      Please search manually by entering your Mumbai area or pincode above to find nearby salons.
+                    </p>
+                  </div>
+                </motion.div>
               )}
 
-              {/* Filtering + View Toggles */}
+              {/* Filters + View Toggle */}
               <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
                 <div className="flex-1 relative max-w-md">
                   <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-glow-muted" />
@@ -326,7 +331,11 @@ export default function SalonMarketplace() {
                     placeholder="Search by salon name or specialty…"
                     className="w-full pl-11 pr-4 py-2.5 border border-glow-border rounded-full font-inter text-xs text-glow-black bg-glow-surface outline-none focus:border-glow-gold transition-colors"
                   />
-                  {query && <button onClick={() => setQuery('')} className="absolute right-4 top-1/2 -translate-y-1/2"><X size={14} className="text-glow-muted" /></button>}
+                  {query && (
+                    <button onClick={() => setQuery('')} className="absolute right-4 top-1/2 -translate-y-1/2">
+                      <X size={14} className="text-glow-muted" />
+                    </button>
+                  )}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-4">
@@ -382,22 +391,21 @@ export default function SalonMarketplace() {
                 </div>
               </div>
 
-              {/* ── Content View ── */}
+              {/* ── Content ── */}
               {loading ? (
                 <div className="text-center py-20">
-                  <div className="w-10 h-10 rounded-full border-2 border-glow-gold border-t-transparent animate-spin mx-auto mb-3"></div>
+                  <div className="w-10 h-10 rounded-full border-2 border-glow-gold border-t-transparent animate-spin mx-auto mb-3" />
                   <p className="font-inter text-xs text-glow-muted">Fetching matched salons…</p>
                 </div>
               ) : filteredSalons.length > 0 ? (
                 <div>
                   {viewMode === 'list' ? (
-                    // List View Grid
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
                       {filteredSalons.map((salon, i) => (
-                        <motion.div 
-                          key={salon.id} 
-                          initial={{ opacity: 0, y: 20 }} 
-                          animate={{ opacity: 1, y: 0 }} 
+                        <motion.div
+                          key={salon.id}
+                          initial={{ opacity: 0, y: 20 }}
+                          animate={{ opacity: 1, y: 0 }}
                           transition={{ delay: i * 0.05 }}
                         >
                           <SalonCard salon={salon} />
@@ -405,21 +413,18 @@ export default function SalonMarketplace() {
                       ))}
                     </div>
                   ) : (
-                    // Map View Split Layout
                     <div className="grid lg:grid-cols-3 gap-8">
-                      {/* Left: Map Component */}
                       <div className="lg:col-span-2">
-                        <MapComponent 
-                          userCoords={coords} 
-                          salons={filteredSalons} 
-                          onSelectSalon={(s) => setSelectedMapSalon(s)} 
+                        <MapComponent
+                          userCoords={coords}
+                          salons={filteredSalons}
+                          onSelectSalon={(s) => setSelectedMapSalon(s)}
                         />
                       </div>
 
-                      {/* Right: Selected Salon Detail Summary */}
                       <div className="lg:col-span-1 flex flex-col justify-between">
                         {selectedMapSalon ? (
-                          <motion.div 
+                          <motion.div
                             key={selectedMapSalon.id}
                             initial={{ opacity: 0, x: 20 }}
                             animate={{ opacity: 1, x: 0 }}
@@ -427,10 +432,10 @@ export default function SalonMarketplace() {
                           >
                             <div>
                               <div className="relative h-44 rounded-xl overflow-hidden mb-4">
-                                <img 
-                                  src={selectedMapSalon.image} 
-                                  alt={selectedMapSalon.name} 
-                                  className="w-full h-full object-cover" 
+                                <img
+                                  src={selectedMapSalon.image}
+                                  alt={selectedMapSalon.name}
+                                  className="w-full h-full object-cover"
                                 />
                                 <span className="absolute top-2.5 right-2.5 bg-glow-gold text-white text-[10px] font-bold px-2 py-0.5 rounded-full shadow-md">
                                   {selectedMapSalon.matchScore}% Match
@@ -468,13 +473,13 @@ export default function SalonMarketplace() {
                             <div className="flex items-center justify-between pt-3 border-t border-glow-border mt-auto">
                               <span className="font-inter text-xs font-semibold text-glow-black">Starting from ₹{selectedMapSalon.priceFrom}</span>
                               <div className="flex gap-2">
-                                <button 
+                                <button
                                   onClick={() => window.location.href = `/salons/${selectedMapSalon.id}`}
                                   className="btn-outline-gold py-1.5 px-3 text-xs"
                                 >
                                   View
                                 </button>
-                                <button 
+                                <button
                                   onClick={() => window.location.href = '/booking'}
                                   className="btn-gold py-1.5 px-3 text-xs"
                                 >
@@ -492,12 +497,12 @@ export default function SalonMarketplace() {
                     </div>
                   )}
                 </div>
-              ) : (
+              ) : !loading && rankedSalons.length === 0 && !showLocationError ? (
                 <div className="text-center py-20 card-luxury p-8">
                   <p className="font-playfair text-lg text-glow-muted">No salons found matching those filters.</p>
-                  <p className="font-inter text-xs text-glow-muted/70 mt-1">Try broadening your search query or selecting other filter choices.</p>
+                  <p className="font-inter text-xs text-glow-muted/70 mt-1">Try broadening your search or selecting other filter choices.</p>
                 </div>
-              )}
+              ) : null}
             </div>
           )}
 

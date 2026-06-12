@@ -171,7 +171,6 @@ console.log(result)  // Should show { detections: [...] }
 - Face size: 40-60%
 - Brightness: 80-150
 - Blur: 5-50
-- Hair visible: ✓
 
 ### Scenario B: Low Lighting
 **Expected**: Brightness check fails ✗
